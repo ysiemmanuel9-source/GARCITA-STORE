@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 500" role="img" aria-labelledby="title desc">
+  <title id="title">GARCITA STORE</title>
+  <desc id="desc">Logo gamer rojo, negro y dorado de Garcita Store.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#260005"/>
+      <stop offset="0.45" stop-color="#070707"/>
+      <stop offset="1" stop-color="#3a0009"/>
+    </linearGradient>
+    <linearGradient id="redMetal" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#fff7e0"/>
+      <stop offset="0.18" stop-color="#ff3434"/>
+      <stop offset="0.52" stop-color="#b60013"/>
+      <stop offset="0.8" stop-color="#ff4f4f"/>
+      <stop offset="1" stop-color="#6d000b"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" x2="1">
+      <stop offset="0" stop-color="#fff4b0"/>
+      <stop offset="0.55" stop-color="#d79b25"/>
+      <stop offset="1" stop-color="#fff2a6"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="1 0 0 0 1  0 0.1 0 0 0  0 0 0.1 0 0  0 0 0 1 0"/>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="12" flood-color="#000" flood-opacity="0.7"/>
+      <feDropShadow dx="0" dy="0" stdDeviation="8" flood-color="#ff172b" flood-opacity="0.75"/>
+    </filter>
+    <clipPath id="cut">
+      <path d="M70 110 L135 50 H765 L830 110 V390 L765 450 H135 L70 390 Z"/>
+    </clipPath>
+  </defs>
+
+  <path d="M70 110 L135 50 H765 L830 110 V390 L765 450 H135 L70 390 Z" fill="url(#bg)" stroke="#ff2134" stroke-width="8" filter="url(#shadow)"/>
+  <g clip-path="url(#cut)">
+    <path d="M-20 420 L920 55" stroke="#ff172b" stroke-width="16" opacity="0.3"/>
+    <path d="M-30 370 L930 5" stroke="#fff0a6" stroke-width="3" opacity="0.35"/>
+    <path d="M70 112 H830" stroke="#ff2738" stroke-width="2" opacity="0.65"/>
+    <path d="M70 388 H830" stroke="#ff2738" stroke-width="2" opacity="0.65"/>
+    <g opacity="0.28">
+      <path d="M135 58 L184 24 L225 80 L190 132 Z" fill="none" stroke="#fff4d1" stroke-width="7"/>
+      <path d="M672 365 L720 329 L768 392 L720 445 Z" fill="none" stroke="#fff4d1" stroke-width="7"/>
+      <path d="M704 58 L752 30 L805 86 L757 126 Z" fill="none" stroke="#fff4d1" stroke-width="6"/>
+    </g>
+  </g>
+
+  <text x="450" y="228" text-anchor="middle" font-family="Arial Black, Impact, sans-serif" font-size="172" font-weight="900" fill="#080808" stroke="#000" stroke-width="18" opacity="0.75">GS</text>
+  <text x="450" y="220" text-anchor="middle" font-family="Arial Black, Impact, sans-serif" font-size="172" font-weight="900" fill="url(#redMetal)" stroke="#fff3b0" stroke-width="4" filter="url(#glow)">GS</text>
+  <text x="450" y="322" text-anchor="middle" font-family="Arial Black, Impact, sans-serif" font-size="82" font-weight="900" letter-spacing="3" fill="url(#redMetal)" stroke="#190006" stroke-width="6">GARCITA</text>
+  <text x="450" y="378" text-anchor="middle" font-family="Arial Black, Impact, sans-serif" font-size="48" font-weight="900" letter-spacing="11" fill="url(#gold)" stroke="#1c0700" stroke-width="3">STORE</text>
+  <path d="M211 405 H689" stroke="#ff2436" stroke-width="5" stroke-linecap="round"/>
+  <path d="M260 425 H640" stroke="#fff1a0" stroke-width="2" stroke-linecap="round" opacity="0.7"/>
+</svg>
