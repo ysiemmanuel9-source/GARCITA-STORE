@@ -1,5 +1,6 @@
 require("dotenv").config();
 
+const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const cors = require("cors");
@@ -8,6 +9,7 @@ const rateLimit = require("express-rate-limit");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const mysql = require("mysql2/promise");
+const { getDbConfig } = require("./scripts/db-config");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
@@ -107,16 +109,8 @@ const DEFAULT_PRODUCTS = [
   }
 ];
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || "localhost",
-  port: Number(process.env.DB_PORT || 3306),
-  user: process.env.DB_USER || "root",
-  password: process.env.DB_PASSWORD || "",
-  database: process.env.DB_NAME || "garcita_store_web",
-  waitForConnections: true,
-  connectionLimit: 10,
-  namedPlaceholders: true
-});
+const { config: poolConfig, database: DATABASE_NAME } = getDbConfig({ includeDatabase: true, multipleStatements: true });
+const pool = mysql.createPool(poolConfig);
 
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
@@ -201,6 +195,24 @@ const activeVisitors = new Map();
 
 function query(sql, params = {}) {
   return pool.execute(sql, params).then(([rows]) => rows);
+}
+
+async function createDatabaseIfNeeded() {
+  const { config, database } = getDbConfig({ includeDatabase: false, multipleStatements: true });
+  const connection = await mysql.createConnection(config);
+  try {
+    await connection.query(`CREATE DATABASE IF NOT EXISTS \`${database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`);
+  } catch (error) {
+    console.warn(`No se pudo crear la base "${database}". Se intentara usar la base configurada: ${error.message}`);
+  } finally {
+    await connection.end();
+  }
+}
+
+async function applySchema() {
+  await createDatabaseIfNeeded();
+  const schemaSql = fs.readFileSync(path.join(__dirname, "database", "schema.sql"), "utf8");
+  await pool.query(schemaSql);
 }
 
 async function ensureSchema() {
@@ -702,6 +714,7 @@ app.use((error, _req, res, _next) => {
 });
 
 async function start() {
+  await applySchema();
   await pool.query("SELECT 1");
   await ensureSchema();
   await syncConfiguredAdmin();
@@ -714,6 +727,7 @@ async function start() {
   app.listen(PORT, HOST, () => {
     console.log(`${BRAND_NAME} corriendo en http://localhost:${PORT}`);
     console.log(`Panel admin: http://localhost:${PORT}/admin.html`);
+    console.log(`Base MySQL: ${DATABASE_NAME}`);
   });
 }
 

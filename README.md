@@ -2,6 +2,8 @@
 
 Pagina conectada a MySQL con productos editables, panel administrativo, reportes y compras por WhatsApp.
 
+Para Railway mira `PASOS-RAILWAY.md`. El proyecto ya crea/actualiza tablas automaticamente al arrancar.
+
 ## Abrir local
 
 Haz doble clic en `INICIAR-SERVIDOR.cmd` y abre:
