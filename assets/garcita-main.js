@@ -164,7 +164,7 @@
   fetch("/api/settings")
     .then((response) => (response.ok ? response.json() : null))
     .then((settings) => {
-      if (settings?.whatsappGroup || settings?.discordInvite) whatsappGroup = settings.whatsappGroup || settings.discordInvite;
+      if (settings?.whatsappGroup) whatsappGroup = settings.whatsappGroup;
       if (settings?.whatsappNumber) whatsappNumber = settings.whatsappNumber;
     })
     .catch(() => {});

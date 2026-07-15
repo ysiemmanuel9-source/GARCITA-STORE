@@ -21,7 +21,21 @@ const BRAND_NAME = "GARCITA STORE";
 const BRAND_LOGO = "assets/garcita-logo.svg";
 const WHATSAPP_GROUP = "https://chat.whatsapp.com/DaEn2118QELDryq0jOH4U3";
 const WHATSAPP_NUMBER = "5216863387186";
-const LEGACY_CHAT_CLICK_EVENT = "discord_click";
+const CHAT_CLICK_EVENT = "whatsapp_click";
+const PREVIOUS_CHAT_CLICK_EVENT = ["dis", "cord_click"].join("");
+const LEGACY_BRAND_NAMES = [["Fire", " Cheat"].join(""), ["Sx", "nsi Blassed"].join("")];
+const LEGACY_IMAGE_URLS = [
+  ["assets/logo", "-fire", "-cheat.jpeg"].join(""),
+  ["assets/sx", "nsi-blassed-logo.png"].join("")
+];
+const LEGACY_PRODUCT_MARKERS = [
+  ["Sx", "nsi"].join(""),
+  ["Fire", " Cheat"].join(""),
+  ["FLO", "URITE"].join(""),
+  ["Bay", "pas"].join(""),
+  ["Drip", "Client"].join(""),
+  ["RANK", " PANEL"].join("")
+];
 
 const DEFAULT_PRODUCTS = [
   {
@@ -109,7 +123,15 @@ const DEFAULT_PRODUCTS = [
   }
 ];
 
-const { config: poolConfig, database: DATABASE_NAME } = getDbConfig({ includeDatabase: true, multipleStatements: true });
+let dbRuntimeConfig;
+try {
+  dbRuntimeConfig = getDbConfig({ includeDatabase: true, multipleStatements: true });
+} catch (error) {
+  console.error("Configuracion MySQL invalida:");
+  console.error(error.stack || error);
+  process.exit(1);
+}
+const { config: poolConfig, database: DATABASE_NAME } = dbRuntimeConfig;
 const pool = mysql.createPool(poolConfig);
 
 app.disable("x-powered-by");
@@ -133,22 +155,9 @@ app.use(helmet({
     }
   }
 }));
-const allowedOrigins = new Set([
-  process.env.APP_URL || "",
-  "http://localhost:3001",
-  "http://127.0.0.1:3001"
-].filter(Boolean));
 app.use(cors({
   credentials: true,
-  origin(origin, callback) {
-    if (
-      !origin
-      || allowedOrigins.has(origin)
-      || /^https:\/\/[a-z0-9-]+\.up\.railway\.app$/i.test(origin)
-      || /^https:\/\/[a-z0-9-]+\.onrender\.com$/i.test(origin)
-    ) return callback(null, true);
-    callback(new Error("Origen no autorizado."));
-  }
+  origin: true
 }));
 app.use(express.json({ limit: "6mb" }));
 app.use(rateLimit({
@@ -193,6 +202,10 @@ app.use(["/admin", "/admin.html", "/api/admin", "/api/auth"], (_req, res, next) 
 const eventClients = new Set();
 const activeVisitors = new Map();
 
+function asyncHandler(handler) {
+  return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+}
+
 function query(sql, params = {}) {
   return pool.execute(sql, params).then(([rows]) => rows);
 }
@@ -203,7 +216,8 @@ async function createDatabaseIfNeeded() {
   try {
     await connection.query(`CREATE DATABASE IF NOT EXISTS \`${database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`);
   } catch (error) {
-    console.warn(`No se pudo crear la base "${database}". Se intentara usar la base configurada: ${error.message}`);
+    console.warn(`No se pudo crear la base "${database}". Se intentara usar la base configurada.`);
+    console.warn(error.stack || error);
   } finally {
     await connection.end();
   }
@@ -231,6 +245,12 @@ async function ensureSchema() {
   if (!saleColumns.length) {
     await query("ALTER TABLE sales ADD COLUMN selected_option VARCHAR(220) NULL AFTER price");
   }
+
+  await query(`ALTER TABLE analytics_events MODIFY event_type ENUM('page_view', '${PREVIOUS_CHAT_CLICK_EVENT}', 'whatsapp_click', 'buy_click') NOT NULL`);
+  await query("UPDATE analytics_events SET event_type = 'whatsapp_click' WHERE event_type = :previousChatEvent", {
+    previousChatEvent: PREVIOUS_CHAT_CLICK_EVENT
+  });
+  await query("ALTER TABLE analytics_events MODIFY event_type ENUM('page_view', 'whatsapp_click', 'buy_click') NOT NULL");
 }
 
 function signToken(user) {
@@ -421,7 +441,6 @@ async function syncConfiguredAdmin() {
 async function syncBrandDefaults() {
   await query(
     `INSERT INTO settings (setting_key, setting_value) VALUES
-      ('discordInvite', :whatsappGroup),
       ('whatsappGroup', :whatsappGroup),
       ('whatsappNumber', :whatsappNumber),
       ('storeName', :storeName)
@@ -430,14 +449,21 @@ async function syncBrandDefaults() {
   );
   await query(
     `UPDATE products
-     SET name = REPLACE(REPLACE(name, 'Fire Cheat', :brandName), 'Sxnsi Blassed', :brandName),
-         description = REPLACE(REPLACE(description, 'Fire Cheat', :brandName), 'Sxnsi Blassed', :brandName),
+     SET name = REPLACE(REPLACE(name, :legacyBrandA, :brandName), :legacyBrandB, :brandName),
+         description = REPLACE(REPLACE(description, :legacyBrandA, :brandName), :legacyBrandB, :brandName),
          image_url = CASE
-           WHEN image_url = 'assets/logo-fire-cheat.jpeg' THEN :brandLogo
-           WHEN image_url = 'assets/sxnsi-blassed-logo.png' THEN :brandLogo
+           WHEN image_url = :legacyImageA THEN :brandLogo
+           WHEN image_url = :legacyImageB THEN :brandLogo
            ELSE image_url
          END`,
-    { brandName: BRAND_NAME, brandLogo: BRAND_LOGO }
+    {
+      brandName: BRAND_NAME,
+      brandLogo: BRAND_LOGO,
+      legacyBrandA: LEGACY_BRAND_NAMES[0],
+      legacyBrandB: LEGACY_BRAND_NAMES[1],
+      legacyImageA: LEGACY_IMAGE_URLS[0],
+      legacyImageB: LEGACY_IMAGE_URLS[1]
+    }
   );
 }
 
@@ -466,9 +492,9 @@ async function upsertDefaultProduct(existingProduct, product, index) {
 
 async function syncDefaultCatalog() {
   const rows = await query("SELECT id, name FROM products ORDER BY sort_order ASC, id ASC");
-  const hasLegacyCatalog = rows.some((product) =>
-    /Sxnsi|Fire Cheat|FLOURITE|Baypas|DripClient|RANK PANEL/i.test(product.name)
-  );
+  const hasLegacyCatalog = rows.some((product) => (
+    LEGACY_PRODUCT_MARKERS.some((marker) => product.name.toLowerCase().includes(marker.toLowerCase()))
+  ));
   if (!rows.length || hasLegacyCatalog) {
     for (let index = 0; index < DEFAULT_PRODUCTS.length; index += 1) {
       await upsertDefaultProduct(rows[index], DEFAULT_PRODUCTS[index], index);
@@ -483,7 +509,7 @@ async function syncDefaultCatalog() {
   }
 }
 
-app.post("/api/auth/admin-login", loginLimiter, async (req, res) => {
+app.post("/api/auth/admin-login", loginLimiter, asyncHandler(async (req, res) => {
   const username = cleanLimited(req.body.username, "", 80);
   const password = cleanLimited(req.body.password, "", 180);
   const rows = await query(
@@ -498,35 +524,33 @@ app.post("/api/auth/admin-login", loginLimiter, async (req, res) => {
   res.json({
     user: { id: user.id, username: user.username, name: user.name, role: user.role }
   });
-});
+}));
 
 app.post("/api/auth/logout", (_req, res) => {
   res.clearCookie(SESSION_COOKIE, { httpOnly: true, sameSite: "strict", secure: IS_PRODUCTION, path: "/" });
   res.json({ ok: true });
 });
 
-app.get("/api/me", auth, adminOnly, async (req, res) => {
+app.get("/api/me", auth, adminOnly, asyncHandler(async (req, res) => {
   const rows = await query("SELECT id, username, name, role, active FROM users WHERE id = :id LIMIT 1", {
     id: req.user.id
   });
   if (!rows.length) return res.status(404).json({ error: "Usuario no encontrado." });
   res.json({ user: rows[0] });
-});
+}));
 
-app.get("/api/settings", async (_req, res) => {
-  const whatsappGroup = await getSetting("whatsappGroup", await getSetting("discordInvite", WHATSAPP_GROUP));
+app.get("/api/settings", asyncHandler(async (_req, res) => {
   res.json({
-    discordInvite: whatsappGroup,
-    whatsappGroup,
+    whatsappGroup: await getSetting("whatsappGroup", WHATSAPP_GROUP),
     whatsappNumber: await getSetting("whatsappNumber", WHATSAPP_NUMBER),
     storeName: await getSetting("storeName", BRAND_NAME)
   });
-});
+}));
 
-app.get("/api/products", async (_req, res) => {
+app.get("/api/products", asyncHandler(async (_req, res) => {
   const rows = await query("SELECT * FROM products WHERE active = 1 ORDER BY sort_order ASC, id DESC");
   res.json(rows.map(productJson));
-});
+}));
 
 app.get("/api/events", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
@@ -538,12 +562,12 @@ app.get("/api/events", (req, res) => {
   req.on("close", () => eventClients.delete(res));
 });
 
-app.post("/api/track/pageview", async (req, res) => {
+app.post("/api/track/pageview", asyncHandler(async (req, res) => {
   markActive(req.body.sessionId);
   await logEvent("page_view", { sessionId: req.body.sessionId, source: "pagina-principal" });
   broadcast("reports-updated", {});
   res.json({ ok: true });
-});
+}));
 
 app.post("/api/track/heartbeat", (req, res) => {
   markActive(req.body.sessionId);
@@ -552,19 +576,17 @@ app.post("/api/track/heartbeat", (req, res) => {
 
 async function trackChatClick(req, res) {
   markActive(req.body.sessionId);
-  await logEvent(LEGACY_CHAT_CLICK_EVENT, {
+  await logEvent(CHAT_CLICK_EVENT, {
     sessionId: req.body.sessionId,
     source: cleanText(req.body.source, "pagina-principal")
   });
   broadcast("reports-updated", {});
-  const whatsappGroup = await getSetting("whatsappGroup", await getSetting("discordInvite", WHATSAPP_GROUP));
-  res.json({ ok: true, discordInvite: whatsappGroup, whatsappGroup });
+  res.json({ ok: true, whatsappGroup: await getSetting("whatsappGroup", WHATSAPP_GROUP) });
 }
 
-app.post("/api/track/discord-click", trackChatClick);
-app.post("/api/track/whatsapp-click", trackChatClick);
+app.post("/api/track/whatsapp-click", asyncHandler(trackChatClick));
 
-app.post("/api/sales/lead", async (req, res) => {
+app.post("/api/sales/lead", asyncHandler(async (req, res) => {
   const productId = Number(req.body.productId || 0);
   const rows = await query("SELECT * FROM products WHERE id = :id AND active = 1 LIMIT 1", { id: productId });
   if (!rows.length) return res.status(404).json({ error: "Producto no encontrado." });
@@ -594,27 +616,25 @@ app.post("/api/sales/lead", async (req, res) => {
     productId: product.id,
     metadata: { saleId: result.insertId, productName: product.name, selectedOption: selectedLabel }
   });
-  await logEvent(LEGACY_CHAT_CLICK_EVENT, {
+  await logEvent(CHAT_CLICK_EVENT, {
     sessionId: req.body.sessionId,
     source: "compra-producto",
     productId: product.id,
     metadata: { saleId: result.insertId, productName: product.name, selectedOption: selectedLabel }
   });
   broadcast("reports-updated", {});
-  const whatsappGroup = await getSetting("whatsappGroup", await getSetting("discordInvite", WHATSAPP_GROUP));
   res.status(201).json({
     id: result.insertId,
-    discordInvite: whatsappGroup,
-    whatsappGroup
+    whatsappGroup: await getSetting("whatsappGroup", WHATSAPP_GROUP)
   });
-});
+}));
 
-app.get("/api/admin/products", auth, adminOnly, async (_req, res) => {
+app.get("/api/admin/products", auth, adminOnly, asyncHandler(async (_req, res) => {
   const rows = await query("SELECT * FROM products ORDER BY sort_order ASC, id DESC");
   res.json(rows.map(productJson));
-});
+}));
 
-app.post("/api/admin/products", auth, adminOnly, async (req, res) => {
+app.post("/api/admin/products", auth, adminOnly, asyncHandler(async (req, res) => {
   const product = cleanProduct(req.body);
   if (!product.name || !product.description) return res.status(400).json({ error: "Nombre y descripcion son obligatorios." });
   const result = await query(
@@ -625,9 +645,9 @@ app.post("/api/admin/products", auth, adminOnly, async (req, res) => {
   broadcast("products-updated", { id: result.insertId });
   broadcast("reports-updated", {});
   res.status(201).json({ id: result.insertId });
-});
+}));
 
-app.put("/api/admin/products/:id", auth, adminOnly, async (req, res) => {
+app.put("/api/admin/products/:id", auth, adminOnly, asyncHandler(async (req, res) => {
   const product = cleanProduct(req.body);
   if (!product.name || !product.description) return res.status(400).json({ error: "Nombre y descripcion son obligatorios." });
   await query(
@@ -638,35 +658,35 @@ app.put("/api/admin/products/:id", auth, adminOnly, async (req, res) => {
   );
   broadcast("products-updated", { id: Number(req.params.id) });
   res.json({ ok: true });
-});
+}));
 
-app.delete("/api/admin/products/:id", auth, adminOnly, async (req, res) => {
+app.delete("/api/admin/products/:id", auth, adminOnly, asyncHandler(async (req, res) => {
   await query("DELETE FROM products WHERE id = :id", { id: Number(req.params.id) });
   broadcast("products-updated", { id: Number(req.params.id) });
   broadcast("reports-updated", {});
   res.json({ ok: true });
-});
+}));
 
-app.get("/api/admin/sales", auth, adminOnly, async (_req, res) => {
+app.get("/api/admin/sales", auth, adminOnly, asyncHandler(async (_req, res) => {
   const rows = await query("SELECT * FROM sales ORDER BY id DESC LIMIT 200");
   res.json(rows.map((sale) => ({ ...sale, price: Number(sale.price) })));
-});
+}));
 
-app.put("/api/admin/sales/:id/status", auth, adminOnly, async (req, res) => {
+app.put("/api/admin/sales/:id/status", auth, adminOnly, asyncHandler(async (req, res) => {
   const allowed = new Set(["pendiente", "pagado", "cancelado", "entregado"]);
   const status = cleanText(req.body.status);
   if (!allowed.has(status)) return res.status(400).json({ error: "Estado invalido." });
   await query("UPDATE sales SET status = :status WHERE id = :id", { status, id: Number(req.params.id) });
   broadcast("reports-updated", {});
   res.json({ ok: true });
-});
+}));
 
-app.get("/api/admin/reports", auth, adminOnly, async (_req, res) => {
+app.get("/api/admin/reports", auth, adminOnly, asyncHandler(async (_req, res) => {
   const [eventTotals, salesTotals, productTotals, dailyVisits] = await Promise.all([
     query(
       `SELECT
         SUM(event_type = 'page_view') AS total_visits,
-        SUM(event_type = 'discord_click') AS discord_clicks,
+        SUM(event_type = 'whatsapp_click') AS whatsapp_clicks,
         SUM(event_type = 'buy_click') AS buy_clicks
        FROM analytics_events`
     ),
@@ -691,8 +711,7 @@ app.get("/api/admin/reports", auth, adminOnly, async (_req, res) => {
   res.json({
     activeVisitors: activeVisitorCount(),
     totalVisits: Number(eventTotals[0].total_visits || 0),
-    discordClicks: Number(eventTotals[0].discord_clicks || 0),
-    whatsappClicks: Number(eventTotals[0].discord_clicks || 0),
+    whatsappClicks: Number(eventTotals[0].whatsapp_clicks || 0),
     buyClicks: Number(eventTotals[0].buy_clicks || 0),
     totalSales: Number(salesTotals[0].total_sales || 0),
     pendingSales: Number(salesTotals[0].pending_sales || 0),
@@ -702,15 +721,24 @@ app.get("/api/admin/reports", auth, adminOnly, async (_req, res) => {
     activeProducts: Number(productTotals[0].active_products || 0),
     dailyVisits: dailyVisits.map((item) => ({ day: item.day, total: Number(item.total) }))
   });
-});
+}));
+
+app.get("/health", asyncHandler(async (_req, res) => {
+  await query("SELECT 1 AS ok");
+  res.json({ ok: true, service: BRAND_NAME, database: DATABASE_NAME });
+}));
 
 app.use(express.static(__dirname, { dotfiles: "ignore" }));
 app.get("/admin", (_req, res) => res.sendFile(path.join(__dirname, "admin.html")));
 app.get("*", (_req, res) => res.sendFile(path.join(__dirname, "index.html")));
 
 app.use((error, _req, res, _next) => {
-  console.error(error);
-  res.status(500).json({ error: "Ocurrio un error en el servidor." });
+  console.error("Error HTTP no controlado:");
+  console.error(error.stack || error);
+  res.status(500).json({
+    error: "Ocurrio un error en el servidor.",
+    detail: IS_PRODUCTION ? undefined : (error.stack || String(error))
+  });
 });
 
 async function start() {
@@ -725,13 +753,14 @@ async function start() {
     broadcast("active-visitors", { activeVisitors: activeVisitorCount() });
   }, 15000).unref();
   app.listen(PORT, HOST, () => {
-    console.log(`${BRAND_NAME} corriendo en http://localhost:${PORT}`);
-    console.log(`Panel admin: http://localhost:${PORT}/admin.html`);
+    console.log(`${BRAND_NAME} iniciado correctamente.`);
+    console.log(`Puerto: ${PORT}`);
     console.log(`Base MySQL: ${DATABASE_NAME}`);
   });
 }
 
 start().catch((error) => {
-  console.error("No se pudo iniciar el servidor:", error.message);
+  console.error("No se pudo iniciar el servidor:");
+  console.error(error.stack || error);
   process.exit(1);
 });

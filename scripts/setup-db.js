@@ -13,7 +13,8 @@ async function main() {
   try {
     await connection.query(`CREATE DATABASE IF NOT EXISTS \`${database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`);
   } catch (error) {
-    console.warn(`No se pudo crear la base "${database}". Intentando usarla directamente: ${error.message}`);
+    console.warn(`No se pudo crear la base "${database}". Intentando usarla directamente.`);
+    console.warn(error.stack || error);
   }
   await connection.query(`USE \`${database}\`;`);
   await connection.query(sql);
@@ -22,6 +23,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("Error creando la base de datos:", error.message);
+  console.error("Error creando/actualizando la base de datos:");
+  console.error(error.stack || error);
   process.exit(1);
 });

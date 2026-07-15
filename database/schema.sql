@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS sales (
 
 CREATE TABLE IF NOT EXISTS analytics_events (
   id INT AUTO_INCREMENT PRIMARY KEY,
-  event_type ENUM('page_view', 'discord_click', 'buy_click') NOT NULL,
+  event_type ENUM('page_view', 'whatsapp_click', 'buy_click') NOT NULL,
   source VARCHAR(120) NULL,
   session_id VARCHAR(120) NULL,
   product_id INT NULL,
@@ -55,7 +55,6 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 
 INSERT INTO settings (setting_key, setting_value) VALUES
-  ('discordInvite', 'https://chat.whatsapp.com/DaEn2118QELDryq0jOH4U3'),
   ('whatsappGroup', 'https://chat.whatsapp.com/DaEn2118QELDryq0jOH4U3'),
   ('whatsappNumber', '5216863387186'),
   ('storeName', 'GARCITA STORE')

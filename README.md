@@ -1,38 +1,19 @@
 # GARCITA STORE Web
 
-Pagina conectada a MySQL con productos editables, panel administrativo, reportes y compras por WhatsApp.
+Proyecto listo para Railway con Express, MySQL, panel administrativo, productos editables, reportes y compras por WhatsApp.
 
-Para Railway mira `PASOS-RAILWAY.md`. El proyecto ya crea/actualiza tablas automaticamente al arrancar.
+## Railway
 
-## Abrir local
+1. Sube este proyecto a GitHub.
+2. En Railway crea un proyecto desde ese repositorio.
+3. Agrega un servicio MySQL en el mismo proyecto.
+4. En el servicio web, enlaza o copia las variables del servicio MySQL:
+   `MYSQLHOST`, `MYSQLPORT`, `MYSQLUSER`, `MYSQLPASSWORD`, `MYSQLDATABASE`, `MYSQL_URL`.
+5. Define:
+   `NODE_ENV=production`, `JWT_SECRET`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`.
 
-Haz doble clic en `INICIAR-SERVIDOR.cmd` y abre:
+El comando `npm start` crea/actualiza base de datos, crea tablas, sincroniza admin inicial y levanta la pagina.
 
-- Pagina principal: `http://localhost:3001`
-- Panel administrativo: `http://localhost:3001/admin.html`
+El comando `npm run verify` revisa estructura, scripts, assets, `railway.json` y variables MySQL simuladas de Railway.
 
-Las funciones de MySQL y el panel no funcionan con Go Live porque necesitan el servidor Node.
-
-## Acceso inicial
-
-- Usuario: el valor de `ADMIN_USERNAME` en `.env`.
-- Contrasena: el valor de `ADMIN_PASSWORD` en `.env`.
-
-Si no defines valores, el servidor usa `admin` y `Admin12345` para desarrollo.
-
-## Base de datos
-
-La base sugerida se llama `garcita_store_web`. Puedes cambiarla en `.env`.
-
-Tablas principales:
-
-- `products`: productos, fotos y opciones de compra.
-- `users`: acceso del administrador.
-- `sales`: solicitudes y estados de ventas.
-- `analytics_events`: visitas, compras y clics hacia WhatsApp.
-- `settings`: nombre de tienda, grupo y numero de WhatsApp.
-
-## WhatsApp
-
-- Grupo: `https://chat.whatsapp.com/DaEn2118QELDryq0jOH4U3`
-- Compra directa: `+52 1 686 338 7186`
+Mas detalle en `PASOS-RAILWAY.md`.
