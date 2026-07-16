@@ -45,7 +45,7 @@
 
   function optionMarkup(options = []) {
     if (!options.length) return "";
-    return `<div class="product-option"><label>Opcion</label><select class="purchase-option">${
+    return `<div class="product-option"><label>Opción</label><select class="purchase-option">${
       options.map((option) => (
         `<option value="${escapeHtml(option.label)}" data-price="${escapeHtml(option.price || "")}">`
         + `${escapeHtml(option.label)}${option.price ? ` - ${escapeHtml(option.price)}` : ""}</option>`
@@ -104,12 +104,12 @@
   function buildWhatsappUrl(productName, optionLabel, optionPrice) {
     const optionText = optionLabel
       ? `${optionLabel}${optionPrice ? ` (${optionPrice})` : ""}`
-      : "Sin opcion seleccionada";
+      : "Sin opción seleccionada";
     const message = [
       "Hola GARCITA STORE, vengo de la pagina y quiero comprar:",
       "",
       `Producto: ${productName}`,
-      `Opcion: ${optionText}`,
+      `Opción: ${optionText}`,
       "",
       "Me ayudas con los pasos para pagar y recibirlo?"
     ].join("\n");

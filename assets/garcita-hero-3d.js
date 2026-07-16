@@ -25,13 +25,13 @@ if (canvas && shell) {
   key.position.set(-3.8, 3.5, 4.5);
   scene.add(key);
 
-  const rim = new THREE.PointLight(0xffd36a, 3.2, 14);
+  const rim = new THREE.PointLight(0xff5a66, 3.2, 14);
   rim.position.set(4, -2.4, 3.5);
   scene.add(rim);
 
-  const blueFill = new THREE.PointLight(0x9dd7ff, 0.8, 11);
-  blueFill.position.set(0, 3, -4);
-  scene.add(blueFill);
+  const redFill = new THREE.PointLight(0xff2538, 0.9, 11);
+  redFill.position.set(0, 3, -4);
+  scene.add(redFill);
 
   const logoGroup = new THREE.Group();
   scene.add(logoGroup);
@@ -55,7 +55,7 @@ if (canvas && shell) {
       const x = (i * 137) % 1700 - 70;
       const y = (i * 89) % 1000;
       const len = 380 + (i % 6) * 42;
-      ctx.strokeStyle = i % 3 === 0 ? "#ffd777" : "#ff2337";
+      ctx.strokeStyle = i % 3 === 0 ? "#ff6a72" : "#ff2337";
       ctx.lineWidth = i % 3 === 0 ? 3 : 9;
       ctx.beginPath();
       ctx.moveTo(x, y + 250);
@@ -82,7 +82,7 @@ if (canvas && shell) {
     ctx.stroke(frame);
     ctx.shadowBlur = 0;
     ctx.lineWidth = 5;
-    ctx.strokeStyle = "#ffe29b";
+    ctx.strokeStyle = "#ff8a92";
     ctx.stroke(frame);
 
     function drawText(text, x, y, size, spacing, fill, strokeWidth = 8) {
@@ -95,7 +95,7 @@ if (canvas && shell) {
       ctx.strokeStyle = "#120004";
       ctx.lineWidth = strokeWidth + 18;
       ctx.strokeText(text, x, y);
-      ctx.strokeStyle = "#ffe8a6";
+      ctx.strokeStyle = "#ff9aa3";
       ctx.lineWidth = strokeWidth;
       ctx.strokeText(text, x, y);
       ctx.fillStyle = fill;
@@ -116,9 +116,9 @@ if (canvas && shell) {
     drawText("GARCITA", 800, 660, 164, 4, redText, 7);
 
     const gold = ctx.createLinearGradient(0, 700, 1600, 850);
-    gold.addColorStop(0, "#fff7bb");
-    gold.addColorStop(0.5, "#d49a22");
-    gold.addColorStop(1, "#fff2a1");
+    gold.addColorStop(0, "#ffffff");
+    gold.addColorStop(0.5, "#ff5a66");
+    gold.addColorStop(1, "#ffb0b7");
     drawText("STORE", 800, 790, 88, 14, gold, 5);
 
     ctx.save();

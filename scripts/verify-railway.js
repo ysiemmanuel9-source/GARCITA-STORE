@@ -17,6 +17,7 @@ const requiredFiles = [
   "assets/garcita-main.js",
   "assets/garcita-hero-3d.js",
   "assets/vendor/three.module.js",
+  "assets/vendor/three.core.js",
   "assets/garcita-panel-ios.jpeg",
   "assets/garcita-diamantes.jpeg",
   "assets/garcita-instagram.jpeg",
