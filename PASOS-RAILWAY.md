@@ -15,22 +15,26 @@ En el servicio web configura:
 ```env
 NODE_ENV=production
 JWT_SECRET=pon_un_texto_largo_y_secreto
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=pon_tu_clave_segura
+ADMIN_USERNAME=Garcita9
+ADMIN_PASSWORD=GarcitaStore
 ```
 
-Si Railway no copia automaticamente las variables del MySQL al servicio web, agregalas como referencias desde el servicio MySQL:
+IMPORTANTE: que los dos cuadros esten conectados en el canvas no siempre mete las variables dentro del servicio web. En Railway, el servicio web debe tener variables de referencia al servicio MySQL.
+
+En la pestana `Variables` del servicio web `GARCITA-STORE`, pega estas referencias:
 
 ```env
+MYSQL_URL=${{MySQL.MYSQL_URL}}
 MYSQLHOST=${{MySQL.MYSQLHOST}}
 MYSQLPORT=${{MySQL.MYSQLPORT}}
 MYSQLUSER=${{MySQL.MYSQLUSER}}
 MYSQLPASSWORD=${{MySQL.MYSQLPASSWORD}}
 MYSQLDATABASE=${{MySQL.MYSQLDATABASE}}
-MYSQL_URL=${{MySQL.MYSQL_URL}}
 ```
 
 Si tu servicio MySQL se llama distinto, cambia `MySQL` por el nombre real del servicio.
+
+Despues de agregar o corregir variables, haz `Deploy` o `Redeploy` del servicio web. Railway aplica las variables a la siguiente ejecucion del servicio.
 
 ## 3. Start command
 
@@ -58,3 +62,16 @@ Cuando Railway termine el deploy:
 - Panel: `https://tu-app.up.railway.app/admin.html`
 
 Usa el usuario y clave que pusiste en `ADMIN_USERNAME` y `ADMIN_PASSWORD`.
+
+Credenciales por defecto de este ZIP:
+
+- Usuario: `Garcita9`
+- Contrasena: `GarcitaStore`
+
+Para confirmar que MySQL llego al servicio web, abre:
+
+```text
+https://tu-app.up.railway.app/health
+```
+
+Debe salir `database.status` como `ready` o `connecting`, y `mysqlEnvPresent.MYSQL_URL` o `mysqlEnvPresent.MYSQLHOST` en `true`. Si salen en `false`, Railway todavia no esta inyectando las variables al servicio web.

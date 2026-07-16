@@ -9,7 +9,16 @@ const rateLimit = require("express-rate-limit");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const mysql = require("mysql2/promise");
-const { getDbConfig, hasMysqlConfig, printEnvDiagnostics } = require("./scripts/db-config");
+const {
+  getDbConfigCandidates,
+  getDbSearchOrder,
+  hasMysqlConfig,
+  logMysqlError,
+  printEnvDiagnostics,
+  serializeMysqlError,
+  summarizeDbCandidate,
+  getSafeEnvDiagnostics
+} = require("./scripts/db-config");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
@@ -133,7 +142,11 @@ const dbState = {
   database: null,
   lastAttemptAt: null,
   lastReadyAt: null,
-  lastError: null
+  lastError: null,
+  lastErrorDetails: null,
+  lastConnectionErrors: [],
+  lastSearchOrder: [],
+  lastCandidateSources: []
 };
 
 app.disable("x-powered-by");
@@ -217,8 +230,34 @@ function serializeDbState() {
     source: dbState.source,
     lastAttemptAt: dbState.lastAttemptAt,
     lastReadyAt: dbState.lastReadyAt,
-    lastError: dbState.lastError
+    lastError: dbState.lastError,
+    lastErrorDetails: dbState.lastErrorDetails,
+    lastConnectionErrors: dbState.lastConnectionErrors,
+    lastSearchOrder: dbState.lastSearchOrder,
+    lastCandidateSources: dbState.lastCandidateSources
   };
+}
+
+function mysqlEnvPresence() {
+  return Object.fromEntries(
+    Object.entries(getSafeEnvDiagnostics()).map(([key, value]) => [key, Boolean(value.present)])
+  );
+}
+
+function mysqlConfigSources() {
+  try {
+    return getDbConfigCandidates({ includeDatabase: true, multipleStatements: true }).map((candidate) => candidate.source);
+  } catch {
+    return [];
+  }
+}
+
+function mysqlCandidateSummaries() {
+  try {
+    return getDbConfigCandidates({ includeDatabase: true, multipleStatements: true }).map(summarizeDbCandidate);
+  } catch {
+    return [];
+  }
 }
 
 function setDbState(status, updates = {}) {
@@ -231,7 +270,7 @@ function isDatabaseReady() {
 }
 
 function requirePool() {
-  if (!isDatabaseReady()) {
+  if (!pool) {
     throw new DatabaseUnavailableError("La base de datos aun no esta disponible. El servidor sigue activo.");
   }
   return pool;
@@ -253,21 +292,23 @@ async function closePool() {
   }
 }
 
-async function createDatabaseIfNeeded() {
-  const { config, database } = getDbConfig({ includeDatabase: false, multipleStatements: true });
-  const connection = await mysql.createConnection(config);
+async function createDatabaseIfNeeded(config, database) {
+  const connectionConfig = { ...config };
+  delete connectionConfig.database;
+  const connection = await mysql.createConnection(connectionConfig);
   try {
     await connection.query(`CREATE DATABASE IF NOT EXISTS \`${database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`);
   } catch (error) {
-    console.warn(`No se pudo crear la base "${database}". Se intentara usar la base configurada.`);
-    console.warn(error.stack || error);
+    logMysqlError(`[server-db] Error ORIGINAL creando la base "${database}". Se intentara usar la base configurada.`, error, {
+      database
+    });
   } finally {
     await connection.end();
   }
 }
 
-async function applySchema() {
-  await createDatabaseIfNeeded();
+async function applySchema(config, database) {
+  await createDatabaseIfNeeded(config, database);
   const schemaSql = fs.readFileSync(path.join(__dirname, "database", "schema.sql"), "utf8");
   await requirePool().query(schemaSql);
 }
@@ -289,6 +330,9 @@ async function ensureSchema() {
     await query("ALTER TABLE sales ADD COLUMN selected_option VARCHAR(220) NULL AFTER price");
   }
 
+  await query("ALTER TABLE sales MODIFY status ENUM('pendiente', 'pagado', 'cancelado', 'entregado') NOT NULL DEFAULT 'pendiente'");
+  await query("ALTER TABLE analytics_events MODIFY event_type ENUM('page_view', 'discord_click', 'whatsapp_click', 'buy_click') NOT NULL");
+  await query("UPDATE analytics_events SET event_type = 'whatsapp_click' WHERE event_type = 'discord_click'");
   await query("ALTER TABLE analytics_events MODIFY event_type ENUM('page_view', 'whatsapp_click', 'buy_click') NOT NULL");
 }
 
@@ -307,39 +351,104 @@ async function initializeDatabaseInBackground() {
   dbInitializationPromise = (async () => {
     setDbState("connecting", {
       lastAttemptAt: new Date().toISOString(),
-      lastError: null
+      lastError: null,
+      lastErrorDetails: null,
+      lastConnectionErrors: [],
+      lastSearchOrder: getDbSearchOrder(),
+      lastCandidateSources: []
     });
     printEnvDiagnostics("server-db");
 
+    let connectionErrors = [];
+    let searchOrder = getDbSearchOrder();
+    let candidateSummaries = [];
+
     try {
-      const { config, database, source } = getDbConfig({ includeDatabase: true, multipleStatements: true });
-      await closePool();
-      pool = mysql.createPool(config);
-      setDbState("connecting", { database, source });
+      const candidates = getDbConfigCandidates({ includeDatabase: true, multipleStatements: true });
+      candidateSummaries = candidates.map(summarizeDbCandidate);
 
-      await applySchema();
-      await requirePool().query("SELECT 1");
-      await ensureSchema();
-      await syncConfiguredAdmin();
-      await syncBrandDefaults();
-      await syncDefaultCatalog();
-
-      setDbState("ready", {
-        database,
-        source,
-        lastReadyAt: new Date().toISOString(),
-        lastError: null
+      console.log("[server-db] Orden de busqueda MySQL:");
+      console.log(JSON.stringify(searchOrder, null, 2));
+      console.log("[server-db] Candidatos MySQL detectados (sin contrasenas):");
+      console.log(JSON.stringify(candidateSummaries, null, 2));
+      setDbState("connecting", {
+        lastSearchOrder: searchOrder,
+        lastCandidateSources: candidateSummaries
       });
-      console.log(`MySQL conectado correctamente. Base: ${database}. Fuente: ${source}.`);
+
+      for (const { config, database, source } of candidates) {
+        const candidateSummary = summarizeDbCandidate({ config, database, source });
+        try {
+          console.log(`[server-db] Intentando conectar MySQL usando: ${source}`);
+          console.log("[server-db] Configuracion seleccionada para crear pool (sin contrasena):");
+          console.log(JSON.stringify(candidateSummary, null, 2));
+          await closePool();
+          pool = mysql.createPool(config);
+          setDbState("connecting", { database, source, lastError: null, lastErrorDetails: null });
+
+          await applySchema(config, database);
+          await requirePool().query("SELECT 1");
+          await ensureSchema();
+          await syncConfiguredAdmin();
+          await syncBrandDefaults();
+          await syncDefaultCatalog();
+
+          setDbState("ready", {
+            database,
+            source,
+            lastReadyAt: new Date().toISOString(),
+            lastError: null
+          });
+          console.log(`MySQL conectado correctamente. Base: ${database}. Fuente: ${source}.`);
+          return;
+        } catch (candidateError) {
+          const errorDetails = serializeMysqlError(candidateError);
+          connectionErrors.push({
+            source,
+            candidate: candidateSummary,
+            error: errorDetails
+          });
+          logMysqlError(`[server-db] Error ORIGINAL de mysql2 usando ${source}. Probando siguiente configuracion si existe.`, candidateError, {
+            source,
+            candidate: candidateSummary
+          });
+          await closePool();
+          setDbState("error", {
+            database,
+            source,
+            lastError: candidateError.stack || String(candidateError),
+            lastErrorDetails: errorDetails,
+            lastConnectionErrors: connectionErrors,
+            lastSearchOrder: searchOrder,
+            lastCandidateSources: candidateSummaries
+          });
+        }
+      }
+
+      const finalError = new Error(`No se pudo conectar a MySQL con ninguna configuracion disponible. Revisa lastConnectionErrors para ver el error original de mysql2.`);
+      finalError.connectionErrors = connectionErrors;
+      throw finalError;
     } catch (error) {
+      const errorDetails = serializeMysqlError(error);
       await closePool();
       setDbState(hasMysqlConfig() ? "error" : "waiting_for_config", {
         database: null,
         source: null,
-        lastError: error.stack || String(error)
+        lastError: error.stack || String(error),
+        lastErrorDetails: errorDetails,
+        lastConnectionErrors: connectionErrors.length ? connectionErrors : [{
+          source: "configuration",
+          candidate: null,
+          error: errorDetails
+        }],
+        lastSearchOrder: searchOrder,
+        lastCandidateSources: candidateSummaries
       });
-      console.error("MySQL no esta listo. El servidor HTTP seguira activo y se reintentara en segundo plano:");
-      console.error(error.stack || error);
+      logMysqlError("[server-db] MySQL no esta listo. Error final registrado antes de reintentar:", error, {
+        searchOrder,
+        candidateSources: candidateSummaries,
+        connectionErrors
+      });
       scheduleDatabaseInitialization();
     }
   })();
@@ -351,8 +460,12 @@ async function initializeDatabaseInBackground() {
   }
 }
 
-function signToken(user) {
-  return jwt.sign({ id: user.id, role: user.role, username: user.username, name: user.name }, JWT_SECRET, {
+function configuredAdminUsername() {
+  return process.env.ADMIN_USERNAME || ADMIN_DEFAULT_USERNAME;
+}
+
+function signToken(user, extra = {}) {
+  return jwt.sign({ id: user.id, role: user.role, username: user.username, name: user.name, ...extra }, JWT_SECRET, {
     expiresIn: "7d"
   });
 }
@@ -470,6 +583,23 @@ function registerAdminLoginFailure(req) {
 
 function clearAdminLoginFailures(req) {
   adminLoginAttempts.delete(requestIdentity(req));
+}
+
+function sendAdminLoginFailure(req, res) {
+  const attempt = registerAdminLoginFailure(req);
+  if (attempt.blocked) {
+    return res.status(403).json({
+      error: ADMIN_BLOCK_MESSAGE,
+      blocked: true,
+      attempts: attempt.failures,
+      blockedUntil: attempt.blockedUntil
+    });
+  }
+  return res.status(401).json({
+    error: `${ADMIN_WARNING_MESSAGE} Intento ${attempt.failures} de ${ADMIN_FAILED_LOGIN_LIMIT}.`,
+    attempts: attempt.failures,
+    attemptsRemaining: attempt.remaining
+  });
 }
 
 function adminBlockPayload(record) {
@@ -611,6 +741,32 @@ function defaultProductJson(product, index) {
   };
 }
 
+function offlineReportJson() {
+  const activeProducts = DEFAULT_PRODUCTS.filter(Boolean).length;
+  return {
+    activeVisitors: activeVisitorCount(),
+    totalVisits: 0,
+    whatsappClicks: 0,
+    buyClicks: 0,
+    totalSales: 0,
+    pendingSales: 0,
+    completedSales: 0,
+    revenue: 0,
+    totalProducts: activeProducts,
+    activeProducts,
+    dailyVisits: [],
+    offline: true,
+    database: serializeDbState()
+  };
+}
+
+function databaseWriteUnavailable(res) {
+  return res.status(503).json({
+    error: "MySQL no esta conectado todavia. No se guardo ningun cambio. Revisa /health y redeploya cuando las variables MySQL esten en el servicio web.",
+    database: serializeDbState()
+  });
+}
+
 async function getSetting(key, fallback = "") {
   if (!isDatabaseReady()) return fallback;
   try {
@@ -664,7 +820,7 @@ function broadcast(event, data = {}) {
 }
 
 async function syncConfiguredAdmin() {
-  const username = process.env.ADMIN_USERNAME || ADMIN_DEFAULT_USERNAME;
+  const username = configuredAdminUsername();
   const passwordHash = process.env.ADMIN_PASSWORD
     ? await bcrypt.hash(process.env.ADMIN_PASSWORD, 10)
     : (process.env.ADMIN_PASSWORD_HASH || ADMIN_DEFAULT_PASSWORD_HASH);
@@ -736,26 +892,23 @@ async function syncDefaultCatalog() {
 app.post("/api/auth/admin-login", loginLimiter, blockAdminLoginIfNeeded, asyncHandler(async (req, res) => {
   const username = cleanLimited(req.body.username, "", 80);
   const password = cleanLimited(req.body.password, "", 180);
+  if (!isDatabaseReady()) {
+    return res.status(503).json({
+      error: "MySQL aun no conecto. Revisa /health: mysqlConfigSources debe mostrar al menos una fuente y database.lastError dira que conexion fallo.",
+      database: serializeDbState(),
+      mysqlEnvPresent: mysqlEnvPresence(),
+      mysqlConfigSources: mysqlConfigSources(),
+      mysqlCandidateSummaries: mysqlCandidateSummaries()
+    });
+  }
+
   const rows = await query(
     "SELECT * FROM users WHERE username = :username AND role = 'admin' AND active = 1 LIMIT 1",
     { username }
   );
   const user = rows[0];
   if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-    const attempt = registerAdminLoginFailure(req);
-    if (attempt.blocked) {
-      return res.status(403).json({
-        error: ADMIN_BLOCK_MESSAGE,
-        blocked: true,
-        attempts: attempt.failures,
-        blockedUntil: attempt.blockedUntil
-      });
-    }
-    return res.status(401).json({
-      error: `${ADMIN_WARNING_MESSAGE} Intento ${attempt.failures} de ${ADMIN_FAILED_LOGIN_LIMIT}.`,
-      attempts: attempt.failures,
-      attemptsRemaining: attempt.remaining
-    });
+    return sendAdminLoginFailure(req, res);
   }
   clearAdminLoginFailures(req);
   setSessionCookie(res, signToken(user));
@@ -895,11 +1048,15 @@ app.post("/api/sales/lead", asyncHandler(async (req, res) => {
 }));
 
 app.get("/api/admin/products", auth, adminOnly, asyncHandler(async (_req, res) => {
+  if (!isDatabaseReady()) {
+    return res.json(DEFAULT_PRODUCTS.map(defaultProductJson));
+  }
   const rows = await query("SELECT * FROM products ORDER BY sort_order ASC, id DESC");
   res.json(rows.map(productJson));
 }));
 
 app.post("/api/admin/products", auth, adminOnly, asyncHandler(async (req, res) => {
+  if (!isDatabaseReady()) return databaseWriteUnavailable(res);
   const product = cleanProduct(req.body);
   if (!product.name || !product.description) return res.status(400).json({ error: "Nombre y descripcion son obligatorios." });
   const result = await query(
@@ -913,6 +1070,7 @@ app.post("/api/admin/products", auth, adminOnly, asyncHandler(async (req, res) =
 }));
 
 app.put("/api/admin/products/:id", auth, adminOnly, asyncHandler(async (req, res) => {
+  if (!isDatabaseReady()) return databaseWriteUnavailable(res);
   const product = cleanProduct(req.body);
   if (!product.name || !product.description) return res.status(400).json({ error: "Nombre y descripcion son obligatorios." });
   await query(
@@ -926,6 +1084,7 @@ app.put("/api/admin/products/:id", auth, adminOnly, asyncHandler(async (req, res
 }));
 
 app.delete("/api/admin/products/:id", auth, adminOnly, asyncHandler(async (req, res) => {
+  if (!isDatabaseReady()) return databaseWriteUnavailable(res);
   await query("DELETE FROM products WHERE id = :id", { id: Number(req.params.id) });
   broadcast("products-updated", { id: Number(req.params.id) });
   broadcast("reports-updated", {});
@@ -933,11 +1092,13 @@ app.delete("/api/admin/products/:id", auth, adminOnly, asyncHandler(async (req, 
 }));
 
 app.get("/api/admin/sales", auth, adminOnly, asyncHandler(async (_req, res) => {
+  if (!isDatabaseReady()) return res.json([]);
   const rows = await query("SELECT * FROM sales ORDER BY id DESC LIMIT 200");
   res.json(rows.map((sale) => ({ ...sale, price: Number(sale.price) })));
 }));
 
 app.put("/api/admin/sales/:id/status", auth, adminOnly, asyncHandler(async (req, res) => {
+  if (!isDatabaseReady()) return databaseWriteUnavailable(res);
   const allowed = new Set(["pendiente", "pagado", "cancelado", "entregado"]);
   const status = cleanText(req.body.status);
   if (!allowed.has(status)) return res.status(400).json({ error: "Estado invalido." });
@@ -947,6 +1108,7 @@ app.put("/api/admin/sales/:id/status", auth, adminOnly, asyncHandler(async (req,
 }));
 
 app.get("/api/admin/reports", auth, adminOnly, asyncHandler(async (_req, res) => {
+  if (!isDatabaseReady()) return res.json(offlineReportJson());
   const [eventTotals, salesTotals, productTotals, dailyVisits] = await Promise.all([
     query(
       `SELECT
@@ -992,7 +1154,10 @@ app.get("/health", (_req, res) => {
   res.status(200).json({
     ok: true,
     service: BRAND_NAME,
-    database: serializeDbState()
+    database: serializeDbState(),
+    mysqlEnvPresent: mysqlEnvPresence(),
+    mysqlConfigSources: mysqlConfigSources(),
+    mysqlCandidateSummaries: mysqlCandidateSummaries()
   });
 });
 

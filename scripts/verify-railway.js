@@ -32,9 +32,9 @@ const legacyDbKeys = [
   ["DB", "PASSWORD"].join("_"),
   ["DB", "NAME"].join("_"),
   ["DB", "DATABASE"].join("_"),
-  ["DB", "URL"].join("_"),
-  ["DATABASE", "URL"].join("_")
+  ["DB", "URL"].join("_")
 ];
+const supportedDatabaseUrlKey = ["DATABASE", "URL"].join("_");
 
 function fail(message) {
   throw new Error(message);
@@ -46,7 +46,7 @@ function read(relativePath) {
 
 function resetMysqlEnv(overrides = {}) {
   for (const key of Object.keys(process.env)) {
-    if (/^MYSQL/i.test(key) || legacyDbKeys.includes(key)) delete process.env[key];
+    if (/^MYSQL/i.test(key) || legacyDbKeys.includes(key) || key === supportedDatabaseUrlKey) delete process.env[key];
   }
   Object.assign(process.env, overrides);
 }
@@ -100,12 +100,9 @@ if (!serverSource.includes("res.status(200).json")) fail("/health debe responder
 const dbConfigSource = read("scripts/db-config.js");
 const forbiddenHelperName = ["require", "Value"].join("");
 if (dbConfigSource.includes(forbiddenHelperName)) fail(`db-config.js no debe usar ${forbiddenHelperName}()`);
-for (const key of legacyDbKeys) {
-  if (dbConfigSource.includes(key)) fail(`db-config.js no debe depender de ${key}`);
-}
 
 const originalEnv = { ...process.env };
-const { getDbConfig, getSafeEnvDiagnostics } = require("./db-config");
+const { getDbConfig, getDbConfigCandidates, getSafeEnvDiagnostics } = require("./db-config");
 
 resetMysqlEnv({
   MYSQL_URL: "mysql://root:secret@mysql.railway.internal:3306/railway",
@@ -122,15 +119,30 @@ if (urlResult.config.port !== 3306) fail("db-config no tomo port desde MYSQL_URL
 if (urlResult.config.user !== "root") fail("db-config no tomo user desde MYSQL_URL");
 if (urlResult.config.password !== "secret") fail("db-config no tomo password desde MYSQL_URL");
 if (urlResult.database !== "railway" || urlResult.config.database !== "railway") fail("db-config no tomo database desde MYSQL_URL");
+const multiCandidates = getDbConfigCandidates({ includeDatabase: true, multipleStatements: true });
+if (multiCandidates.length < 2) fail("db-config debe conservar MYSQLHOST como candidato si MYSQL_URL existe");
+
+resetMysqlEnv({
+  MYSQL_PRIVATE_URL: "mysql://private:secret@mysql-private.railway.internal:3306/private_db"
+});
+const privateUrlResult = getDbConfig({ includeDatabase: true, multipleStatements: true });
+if (privateUrlResult.source !== "MYSQL_PRIVATE_URL") fail("db-config no detecto MYSQL_PRIVATE_URL");
+if (privateUrlResult.config.host !== "mysql-private.railway.internal") fail("db-config no tomo host desde MYSQL_PRIVATE_URL");
+if (privateUrlResult.database !== "private_db") fail("db-config no tomo database desde MYSQL_PRIVATE_URL");
+
+resetMysqlEnv({
+  DATABASE_URL: "mysql://dburl:secret@mysql-dburl.railway.internal:3306/dburl_db"
+});
+const databaseUrlResult = getDbConfig({ includeDatabase: true, multipleStatements: true });
+if (databaseUrlResult.source !== "DATABASE_URL") fail("db-config no detecto DATABASE_URL como fallback MySQL");
+if (databaseUrlResult.config.user !== "dburl") fail("db-config no tomo user desde DATABASE_URL");
 
 const diagnosticsText = JSON.stringify(getSafeEnvDiagnostics(process.env));
 if (diagnosticsText.includes("secret") || diagnosticsText.includes("wrong-password")) {
   fail("El diagnostico de entorno esta exponiendo secretos");
 }
 
-const legacyOverrides = {};
-for (const key of legacyDbKeys) legacyOverrides[key] = key.endsWith("PASSWORD") ? "legacy-secret" : "legacy-value";
-resetMysqlEnv(legacyOverrides);
+resetMysqlEnv({ DB_HOST: "legacy-host-only" });
 let missingConfigFailed = false;
 try {
   getDbConfig({ includeDatabase: true, multipleStatements: true });
@@ -139,6 +151,30 @@ try {
   if (!String(error.stack || error).includes("MYSQL_URL")) fail("El error de configuracion debe mencionar MYSQL_URL");
 }
 if (!missingConfigFailed) fail("db-config no debe conectarse usando variables antiguas");
+
+resetMysqlEnv({
+  DB_HOST: "legacy.railway.internal",
+  DB_PORT: "3306",
+  DB_USER: "legacy-root",
+  DB_PASSWORD: "legacy-secret",
+  DB_NAME: "legacy_db"
+});
+const legacyFieldResult = getDbConfig({ includeDatabase: true, multipleStatements: true });
+if (legacyFieldResult.source !== "DB_HOST/DB_USER/DB_NAME") fail("db-config no uso DB_* como respaldo completo");
+if (legacyFieldResult.config.host !== "legacy.railway.internal") fail("db-config no detecto DB_HOST como respaldo");
+if (legacyFieldResult.database !== "legacy_db") fail("db-config no detecto DB_NAME como respaldo");
+
+resetMysqlEnv({
+  MYSQL_URL: "${{MySQL.MYSQL_URL}}"
+});
+let unresolvedReferenceFailed = false;
+try {
+  getDbConfig({ includeDatabase: true, multipleStatements: true });
+} catch (error) {
+  unresolvedReferenceFailed = true;
+  if (!String(error.stack || error).includes("sin resolver")) fail("El error de referencia Railway debe ser claro");
+}
+if (!unresolvedReferenceFailed) fail("db-config debe fallar si Railway deja una referencia sin resolver");
 
 resetMysqlEnv({
   MYSQLHOST: "mysql.railway.internal",
@@ -153,6 +189,18 @@ if (fieldResult.config.port !== 3306) fail("db-config no detecto MYSQLPORT");
 if (fieldResult.config.user !== "root") fail("db-config no detecto MYSQLUSER");
 if (fieldResult.config.password !== "secret") fail("db-config no detecto MYSQLPASSWORD");
 if (fieldResult.database !== "railway" || fieldResult.config.database !== "railway") fail("db-config no detecto MYSQLDATABASE");
+
+resetMysqlEnv({
+  MYSQL_HOST: "mysql-alias.railway.internal",
+  MYSQL_PORT: "3306",
+  MYSQL_USER: "root",
+  MYSQL_PASSWORD: "secret",
+  MYSQL_DATABASE: "railway_alias"
+});
+const aliasFieldResult = getDbConfig({ includeDatabase: true, multipleStatements: true });
+if (aliasFieldResult.config.host !== "mysql-alias.railway.internal") fail("db-config no detecto MYSQL_HOST");
+if (aliasFieldResult.config.user !== "root") fail("db-config no detecto MYSQL_USER");
+if (aliasFieldResult.database !== "railway_alias") fail("db-config no detecto MYSQL_DATABASE");
 
 process.env = originalEnv;
 
