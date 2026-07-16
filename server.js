@@ -23,6 +23,12 @@ const WHATSAPP_GROUP = "https://chat.whatsapp.com/DaEn2118QELDryq0jOH4U3";
 const WHATSAPP_NUMBER = "5216863387186";
 const CHAT_CLICK_EVENT = "whatsapp_click";
 const MYSQL_RETRY_MS = Math.max(5000, Number(process.env.MYSQL_RETRY_MS || 30000));
+const ADMIN_DEFAULT_USERNAME = "Garcita9";
+const ADMIN_DEFAULT_PASSWORD_HASH = "$2a$10$pAySt1sPQcUqivIlqMZvKe3vq.HeNMWBYG2OZUsBMd45QmNUsZh5W";
+const ADMIN_FAILED_LOGIN_LIMIT = 3;
+const ADMIN_BLOCK_MS = 24 * 60 * 60 * 1000;
+const ADMIN_WARNING_MESSAGE = "Si no eres admin, no pongas mas la contrasena.";
+const ADMIN_BLOCK_MESSAGE = "Bloqueado por querer acceder al panel de admin sin permiso ni contrasena.";
 
 const DEFAULT_PRODUCTS = [
   {
@@ -194,9 +200,11 @@ app.use(["/admin", "/admin.html", "/api/admin", "/api/auth"], (_req, res, next) 
   res.setHeader("Cache-Control", "no-store, max-age=0");
   next();
 });
+app.use(["/admin", "/admin.html", "/api/admin", "/api/me"], blockAdminAreaIfNeeded);
 
 const eventClients = new Set();
 const activeVisitors = new Map();
+const adminLoginAttempts = new Map();
 
 function asyncHandler(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
@@ -401,6 +409,118 @@ function cleanLimited(value, fallback, limit) {
   return cleanText(value, fallback).slice(0, limit);
 }
 
+function escapeHtml(value) {
+  return cleanText(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function requestIdentity(req) {
+  const forwardedFor = req.headers["x-forwarded-for"];
+  const firstForwardedIp = Array.isArray(forwardedFor)
+    ? forwardedFor[0]
+    : String(forwardedFor || "").split(",")[0];
+  return cleanLimited(firstForwardedIp || req.ip || req.socket?.remoteAddress || "unknown", "unknown", 120);
+}
+
+function getAdminAttemptRecord(key) {
+  if (!adminLoginAttempts.has(key)) {
+    adminLoginAttempts.set(key, { failures: 0, blockedUntil: 0 });
+  }
+  return adminLoginAttempts.get(key);
+}
+
+function pruneAdminLoginAttempts() {
+  const now = Date.now();
+  for (const [key, record] of adminLoginAttempts) {
+    if (record.blockedUntil && record.blockedUntil <= now) adminLoginAttempts.delete(key);
+  }
+}
+
+function getAdminBlock(req) {
+  pruneAdminLoginAttempts();
+  const key = requestIdentity(req);
+  const record = adminLoginAttempts.get(key);
+  if (!record?.blockedUntil) return null;
+  if (record.blockedUntil <= Date.now()) {
+    adminLoginAttempts.delete(key);
+    return null;
+  }
+  return { key, record };
+}
+
+function registerAdminLoginFailure(req) {
+  pruneAdminLoginAttempts();
+  const key = requestIdentity(req);
+  const record = getAdminAttemptRecord(key);
+  record.failures += 1;
+  if (record.failures >= ADMIN_FAILED_LOGIN_LIMIT) {
+    record.blockedUntil = Date.now() + ADMIN_BLOCK_MS;
+  }
+  return {
+    failures: record.failures,
+    remaining: Math.max(0, ADMIN_FAILED_LOGIN_LIMIT - record.failures),
+    blocked: Boolean(record.blockedUntil),
+    blockedUntil: record.blockedUntil ? new Date(record.blockedUntil).toISOString() : null
+  };
+}
+
+function clearAdminLoginFailures(req) {
+  adminLoginAttempts.delete(requestIdentity(req));
+}
+
+function adminBlockPayload(record) {
+  return {
+    error: ADMIN_BLOCK_MESSAGE,
+    blocked: true,
+    blockedUntil: record.blockedUntil ? new Date(record.blockedUntil).toISOString() : null
+  };
+}
+
+function blockAdminLoginIfNeeded(req, res, next) {
+  const block = getAdminBlock(req);
+  if (!block) return next();
+  return res.status(403).json(adminBlockPayload(block.record));
+}
+
+function renderAdminBlockPage(blockedUntil) {
+  const untilText = blockedUntil ? new Date(blockedUntil).toLocaleString("es-MX") : "mas tarde";
+  return `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Acceso bloqueado | ${escapeHtml(BRAND_NAME)}</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: Arial, sans-serif; color: #fff; background: radial-gradient(circle at 25% 20%, rgba(255,37,56,.28), transparent 34%), #03050b; }
+    main { width: min(92vw, 560px); padding: 34px; border: 1px solid rgba(255,37,56,.55); border-radius: 18px; background: rgba(18,5,8,.86); box-shadow: 0 30px 90px rgba(0,0,0,.45); }
+    h1 { margin: 0 0 12px; font-size: clamp(30px, 6vw, 54px); line-height: 1; }
+    p { margin: 0 0 18px; font-size: 18px; line-height: 1.55; color: rgba(255,255,255,.82); }
+    strong { color: #ff4051; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Acceso bloqueado</h1>
+    <p><strong>${escapeHtml(ADMIN_BLOCK_MESSAGE)}</strong></p>
+    <p>Tu acceso al panel queda bloqueado temporalmente hasta ${escapeHtml(untilText)}.</p>
+  </main>
+</body>
+</html>`;
+}
+
+function blockAdminAreaIfNeeded(req, res, next) {
+  const block = getAdminBlock(req);
+  if (!block) return next();
+  if ((req.originalUrl || "").startsWith("/api/")) {
+    return res.status(403).json(adminBlockPayload(block.record));
+  }
+  return res.status(403).send(renderAdminBlockPage(block.record.blockedUntil));
+}
+
 function cleanImageUrl(value) {
   const imageUrl = cleanLimited(value, BRAND_LOGO, 900000);
   if (!imageUrl) return BRAND_LOGO;
@@ -544,8 +664,10 @@ function broadcast(event, data = {}) {
 }
 
 async function syncConfiguredAdmin() {
-  const username = process.env.ADMIN_USERNAME || "admin";
-  const passwordHash = await bcrypt.hash(process.env.ADMIN_PASSWORD || "Admin12345", 10);
+  const username = process.env.ADMIN_USERNAME || ADMIN_DEFAULT_USERNAME;
+  const passwordHash = process.env.ADMIN_PASSWORD
+    ? await bcrypt.hash(process.env.ADMIN_PASSWORD, 10)
+    : (process.env.ADMIN_PASSWORD_HASH || ADMIN_DEFAULT_PASSWORD_HASH);
   const rows = await query("SELECT id FROM users WHERE username = :username LIMIT 1", { username });
   if (rows.length) {
     await query(
@@ -611,7 +733,7 @@ async function syncDefaultCatalog() {
   }
 }
 
-app.post("/api/auth/admin-login", loginLimiter, asyncHandler(async (req, res) => {
+app.post("/api/auth/admin-login", loginLimiter, blockAdminLoginIfNeeded, asyncHandler(async (req, res) => {
   const username = cleanLimited(req.body.username, "", 80);
   const password = cleanLimited(req.body.password, "", 180);
   const rows = await query(
@@ -620,8 +742,22 @@ app.post("/api/auth/admin-login", loginLimiter, asyncHandler(async (req, res) =>
   );
   const user = rows[0];
   if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-    return res.status(401).json({ error: "Usuario o clave incorrecta. Los intentos repetidos serán bloqueados por seguridad." });
+    const attempt = registerAdminLoginFailure(req);
+    if (attempt.blocked) {
+      return res.status(403).json({
+        error: ADMIN_BLOCK_MESSAGE,
+        blocked: true,
+        attempts: attempt.failures,
+        blockedUntil: attempt.blockedUntil
+      });
+    }
+    return res.status(401).json({
+      error: `${ADMIN_WARNING_MESSAGE} Intento ${attempt.failures} de ${ADMIN_FAILED_LOGIN_LIMIT}.`,
+      attempts: attempt.failures,
+      attemptsRemaining: attempt.remaining
+    });
   }
+  clearAdminLoginFailures(req);
   setSessionCookie(res, signToken(user));
   res.json({
     user: { id: user.id, username: user.username, name: user.name, role: user.role }

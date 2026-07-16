@@ -14,6 +14,7 @@ const requiredFiles = [
   "scripts/db-config.js",
   "scripts/simulate-railway-start.js",
   "assets/garcita-logo.svg",
+  "assets/security-guard.js",
   "assets/garcita-main.js",
   "assets/garcita-hero-3d.js",
   "assets/vendor/three.module.js",
@@ -84,6 +85,7 @@ for (const file of [
   "scripts/setup-db.js",
   "scripts/db-config.js",
   "scripts/simulate-railway-start.js",
+  "assets/security-guard.js",
   "assets/garcita-main.js"
 ]) {
   new vm.Script(read(file), { filename: file });
@@ -164,6 +166,7 @@ for (const file of [
   "index.html",
   "admin.html",
   "server.js",
+  "assets/security-guard.js",
   "assets/garcita-main.js",
   "database/schema.sql",
   "package.json",
