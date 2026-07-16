@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const fs = require("fs");
 const path = require("path");
+const bcrypt = require("bcryptjs");
 const mysql = require("mysql2/promise");
 const {
   getDbConfigCandidates,
@@ -11,6 +12,61 @@ const {
   serializeMysqlError,
   summarizeDbCandidate
 } = require("./db-config");
+
+const BRAND_NAME = "GARCITA STORE";
+const ADMIN_DEFAULT_USERNAME = "Garcita9";
+const ADMIN_DEFAULT_PASSWORD_HASH = "$2a$10$pAySt1sPQcUqivIlqMZvKe3vq.HeNMWBYG2OZUsBMd45QmNUsZh5W";
+
+function configuredAdminUsername() {
+  const username = String(process.env.ADMIN_USERNAME || "").trim();
+  return username || ADMIN_DEFAULT_USERNAME;
+}
+
+async function configuredAdminPasswordHash() {
+  if (process.env.ADMIN_PASSWORD) return bcrypt.hash(process.env.ADMIN_PASSWORD, 10);
+  return process.env.ADMIN_PASSWORD_HASH || ADMIN_DEFAULT_PASSWORD_HASH;
+}
+
+async function adminSeeds() {
+  const configuredUsername = configuredAdminUsername();
+  const seeds = [{
+    username: configuredUsername,
+    passwordHash: await configuredAdminPasswordHash(),
+    name: `Administrador ${BRAND_NAME}`
+  }];
+
+  if (configuredUsername !== ADMIN_DEFAULT_USERNAME) {
+    seeds.push({
+      username: ADMIN_DEFAULT_USERNAME,
+      passwordHash: ADMIN_DEFAULT_PASSWORD_HASH,
+      name: `Administrador ${BRAND_NAME}`
+    });
+  }
+
+  return seeds;
+}
+
+async function upsertAdminUser(connection, { username, passwordHash, name }) {
+  const [rows] = await connection.execute("SELECT id FROM users WHERE username = :username LIMIT 1", { username });
+  if (rows.length) {
+    await connection.execute(
+      "UPDATE users SET role = 'admin', password_hash = :passwordHash, name = :name, active = 1, updated_at = NOW() WHERE id = :id",
+      { username, passwordHash, name, id: rows[0].id }
+    );
+    return;
+  }
+
+  await connection.execute(
+    "INSERT INTO users (role, username, password_hash, name, active) VALUES ('admin', :username, :passwordHash, :name, 1)",
+    { username, passwordHash, name }
+  );
+}
+
+async function syncAdminUsers(connection) {
+  for (const admin of await adminSeeds()) {
+    await upsertAdminUser(connection, admin);
+  }
+}
 
 async function migrateExistingSchema(connection) {
   const [productColumns] = await connection.query(
@@ -67,6 +123,7 @@ async function main() {
         await connection.query(`USE \`${database}\`;`);
         await connection.query(sql);
         await migrateExistingSchema(connection);
+        await syncAdminUsers(connection);
         console.log(`Base de datos "${database}" creada/actualizada correctamente usando ${source}.`);
         return true;
       } catch (error) {

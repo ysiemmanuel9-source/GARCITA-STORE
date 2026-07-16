@@ -461,7 +461,8 @@ async function initializeDatabaseInBackground() {
 }
 
 function configuredAdminUsername() {
-  return process.env.ADMIN_USERNAME || ADMIN_DEFAULT_USERNAME;
+  const username = String(process.env.ADMIN_USERNAME || "").trim();
+  return username || ADMIN_DEFAULT_USERNAME;
 }
 
 function signToken(user, extra = {}) {
@@ -820,23 +821,44 @@ function broadcast(event, data = {}) {
 }
 
 async function syncConfiguredAdmin() {
-  const username = configuredAdminUsername();
-  const passwordHash = process.env.ADMIN_PASSWORD
+  const configuredUsername = configuredAdminUsername();
+  const configuredPasswordHash = process.env.ADMIN_PASSWORD
     ? await bcrypt.hash(process.env.ADMIN_PASSWORD, 10)
     : (process.env.ADMIN_PASSWORD_HASH || ADMIN_DEFAULT_PASSWORD_HASH);
+  const adminSeeds = [
+    {
+      username: configuredUsername,
+      passwordHash: configuredPasswordHash,
+      name: `Administrador ${BRAND_NAME}`
+    }
+  ];
+
+  if (configuredUsername !== ADMIN_DEFAULT_USERNAME) {
+    adminSeeds.push({
+      username: ADMIN_DEFAULT_USERNAME,
+      passwordHash: ADMIN_DEFAULT_PASSWORD_HASH,
+      name: `Administrador ${BRAND_NAME}`
+    });
+  }
+
+  for (const admin of adminSeeds) {
+    await upsertAdminUser(admin);
+  }
+}
+
+async function upsertAdminUser({ username, passwordHash, name }) {
   const rows = await query("SELECT id FROM users WHERE username = :username LIMIT 1", { username });
   if (rows.length) {
     await query(
-      "UPDATE users SET role = 'admin', password_hash = :passwordHash, name = :name, active = 1 WHERE id = :id",
-      { passwordHash, name: `Administrador ${BRAND_NAME}`, id: rows[0].id }
+      "UPDATE users SET role = 'admin', password_hash = :passwordHash, name = :name, active = 1, updated_at = NOW() WHERE id = :id",
+      { passwordHash, name, id: rows[0].id }
     );
   } else {
     await query(
       "INSERT INTO users (role, username, password_hash, name, active) VALUES ('admin', :username, :passwordHash, :name, 1)",
-      { username, passwordHash, name: `Administrador ${BRAND_NAME}` }
+      { username, passwordHash, name }
     );
   }
-  await query("UPDATE users SET active = 0 WHERE role = 'admin' AND username <> :username", { username });
 }
 
 async function syncBrandDefaults() {
