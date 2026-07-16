@@ -9,7 +9,7 @@ const rateLimit = require("express-rate-limit");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const mysql = require("mysql2/promise");
-const { getDbConfig } = require("./scripts/db-config");
+const { getDbConfig, printEnvDiagnostics } = require("./scripts/db-config");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
@@ -22,20 +22,6 @@ const BRAND_LOGO = "assets/garcita-logo.svg";
 const WHATSAPP_GROUP = "https://chat.whatsapp.com/DaEn2118QELDryq0jOH4U3";
 const WHATSAPP_NUMBER = "5216863387186";
 const CHAT_CLICK_EVENT = "whatsapp_click";
-const PREVIOUS_CHAT_CLICK_EVENT = ["dis", "cord_click"].join("");
-const LEGACY_BRAND_NAMES = [["Fire", " Cheat"].join(""), ["Sx", "nsi Blassed"].join("")];
-const LEGACY_IMAGE_URLS = [
-  ["assets/logo", "-fire", "-cheat.jpeg"].join(""),
-  ["assets/sx", "nsi-blassed-logo.png"].join("")
-];
-const LEGACY_PRODUCT_MARKERS = [
-  ["Sx", "nsi"].join(""),
-  ["Fire", " Cheat"].join(""),
-  ["FLO", "URITE"].join(""),
-  ["Bay", "pas"].join(""),
-  ["Drip", "Client"].join(""),
-  ["RANK", " PANEL"].join("")
-];
 
 const DEFAULT_PRODUCTS = [
   {
@@ -125,6 +111,7 @@ const DEFAULT_PRODUCTS = [
 
 let dbRuntimeConfig;
 try {
+  printEnvDiagnostics("server");
   dbRuntimeConfig = getDbConfig({ includeDatabase: true, multipleStatements: true });
 } catch (error) {
   console.error("Configuracion MySQL invalida:");
@@ -246,10 +233,6 @@ async function ensureSchema() {
     await query("ALTER TABLE sales ADD COLUMN selected_option VARCHAR(220) NULL AFTER price");
   }
 
-  await query(`ALTER TABLE analytics_events MODIFY event_type ENUM('page_view', '${PREVIOUS_CHAT_CLICK_EVENT}', 'whatsapp_click', 'buy_click') NOT NULL`);
-  await query("UPDATE analytics_events SET event_type = 'whatsapp_click' WHERE event_type = :previousChatEvent", {
-    previousChatEvent: PREVIOUS_CHAT_CLICK_EVENT
-  });
   await query("ALTER TABLE analytics_events MODIFY event_type ENUM('page_view', 'whatsapp_click', 'buy_click') NOT NULL");
 }
 
@@ -447,24 +430,6 @@ async function syncBrandDefaults() {
      ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`,
     { whatsappGroup: WHATSAPP_GROUP, whatsappNumber: WHATSAPP_NUMBER, storeName: BRAND_NAME }
   );
-  await query(
-    `UPDATE products
-     SET name = REPLACE(REPLACE(name, :legacyBrandA, :brandName), :legacyBrandB, :brandName),
-         description = REPLACE(REPLACE(description, :legacyBrandA, :brandName), :legacyBrandB, :brandName),
-         image_url = CASE
-           WHEN image_url = :legacyImageA THEN :brandLogo
-           WHEN image_url = :legacyImageB THEN :brandLogo
-           ELSE image_url
-         END`,
-    {
-      brandName: BRAND_NAME,
-      brandLogo: BRAND_LOGO,
-      legacyBrandA: LEGACY_BRAND_NAMES[0],
-      legacyBrandB: LEGACY_BRAND_NAMES[1],
-      legacyImageA: LEGACY_IMAGE_URLS[0],
-      legacyImageB: LEGACY_IMAGE_URLS[1]
-    }
-  );
 }
 
 async function upsertDefaultProduct(existingProduct, product, index) {
@@ -492,10 +457,7 @@ async function upsertDefaultProduct(existingProduct, product, index) {
 
 async function syncDefaultCatalog() {
   const rows = await query("SELECT id, name FROM products ORDER BY sort_order ASC, id ASC");
-  const hasLegacyCatalog = rows.some((product) => (
-    LEGACY_PRODUCT_MARKERS.some((marker) => product.name.toLowerCase().includes(marker.toLowerCase()))
-  ));
-  if (!rows.length || hasLegacyCatalog) {
+  if (!rows.length) {
     for (let index = 0; index < DEFAULT_PRODUCTS.length; index += 1) {
       await upsertDefaultProduct(rows[index], DEFAULT_PRODUCTS[index], index);
     }
@@ -752,15 +714,25 @@ async function start() {
     activeVisitorCount();
     broadcast("active-visitors", { activeVisitors: activeVisitorCount() });
   }, 15000).unref();
-  app.listen(PORT, HOST, () => {
-    console.log(`${BRAND_NAME} iniciado correctamente.`);
-    console.log(`Puerto: ${PORT}`);
-    console.log(`Base MySQL: ${DATABASE_NAME}`);
+
+  return new Promise((resolve) => {
+    const server = app.listen(PORT, HOST, () => {
+      const address = server.address();
+      const activePort = typeof address === "object" && address ? address.port : PORT;
+      console.log(`${BRAND_NAME} iniciado correctamente.`);
+      console.log(`Puerto: ${activePort}`);
+      console.log(`Base MySQL: ${DATABASE_NAME}`);
+      resolve(server);
+    });
   });
 }
 
-start().catch((error) => {
-  console.error("No se pudo iniciar el servidor:");
-  console.error(error.stack || error);
-  process.exit(1);
-});
+if (require.main === module) {
+  start().catch((error) => {
+    console.error("No se pudo iniciar el servidor:");
+    console.error(error.stack || error);
+    process.exit(1);
+  });
+}
+
+module.exports = { app, start };
