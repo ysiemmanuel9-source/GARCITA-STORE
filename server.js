@@ -889,11 +889,48 @@ async function syncDefaultCatalog() {
   }
 }
 
-app.post("/api/auth/admin-login", loginLimiter, blockAdminLoginIfNeeded, asyncHandler(async (req, res) => {
+function safeLoginUser(user) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    username: user.username,
+    role: user.role,
+    active: user.active,
+    hasPasswordHash: Boolean(user.password_hash),
+    name: user.name
+  };
+}
+
+function logAdminLogin(step, data = {}) {
+  console.log(`[admin-login] ${step}`);
+  console.log(JSON.stringify(data, null, 2));
+}
+
+function sendAdminLoginJson(res, statusCode, payload) {
+  logAdminLogin("JSON exacto que responde al frontend", { statusCode, payload });
+  return res.status(statusCode).json(payload);
+}
+
+async function adminLoginHandler(req, res) {
   const username = cleanLimited(req.body.username, "", 80);
   const password = cleanLimited(req.body.password, "", 180);
+
+  logAdminLogin("Peticion recibida", {
+    method: req.method,
+    originalUrl: req.originalUrl,
+    endpointUsadoPorFrontend: "/api/auth/admin-login",
+    aliasDisponible: "/api/admin/login",
+    username,
+    passwordLength: password.length,
+    poolExists: Boolean(pool),
+    dbStatus: dbState.status,
+    dbSource: dbState.source,
+    dbDatabase: dbState.database,
+    isDatabaseReady: isDatabaseReady()
+  });
+
   if (!isDatabaseReady()) {
-    return res.status(503).json({
+    return sendAdminLoginJson(res, 503, {
       error: "MySQL aun no conecto. Revisa /health: mysqlConfigSources debe mostrar al menos una fuente y database.lastError dira que conexion fallo.",
       database: serializeDbState(),
       mysqlEnvPresent: mysqlEnvPresence(),
@@ -902,20 +939,72 @@ app.post("/api/auth/admin-login", loginLimiter, blockAdminLoginIfNeeded, asyncHa
     });
   }
 
-  const rows = await query(
-    "SELECT * FROM users WHERE username = :username AND role = 'admin' AND active = 1 LIMIT 1",
-    { username }
-  );
-  const user = rows[0];
-  if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-    return sendAdminLoginFailure(req, res);
+  const sql = "SELECT * FROM users WHERE username = :username AND role = 'admin' AND active = 1 LIMIT 1";
+  const sqlParams = { username };
+  logAdminLogin("Ejecutando consulta SQL", { sql, params: sqlParams, poolExists: Boolean(pool), dbStatus: dbState.status });
+
+  let rows;
+  try {
+    rows = await query(sql, sqlParams);
+  } catch (error) {
+    const sqlError = serializeMysqlError(error);
+    logMysqlError("[admin-login] Error ORIGINAL ejecutando consulta SQL de login", error, {
+      sql,
+      params: sqlParams,
+      poolExists: Boolean(pool),
+      dbStatus: dbState.status,
+      dbSource: dbState.source,
+      dbDatabase: dbState.database
+    });
+    return sendAdminLoginJson(res, 500, {
+      error: "Error ejecutando consulta SQL del login admin. Revisa mysqlError para ver el error original.",
+      mysqlError: sqlError,
+      database: serializeDbState()
+    });
   }
+
+  logAdminLogin("Resultado de consulta SQL", {
+    rowCount: rows.length,
+    firstRow: safeLoginUser(rows[0])
+  });
+
+  const user = rows[0];
+  let passwordMatches = false;
+  if (user) {
+    passwordMatches = await bcrypt.compare(password, user.password_hash);
+  }
+
+  logAdminLogin("Resultado de validacion de credenciales", {
+    userFound: Boolean(user),
+    passwordMatches
+  });
+
+  if (!user || !passwordMatches) {
+    const attempt = registerAdminLoginFailure(req);
+    if (attempt.blocked) {
+      return sendAdminLoginJson(res, 403, {
+        error: ADMIN_BLOCK_MESSAGE,
+        blocked: true,
+        attempts: attempt.failures,
+        blockedUntil: attempt.blockedUntil
+      });
+    }
+    return sendAdminLoginJson(res, 401, {
+      error: `${ADMIN_WARNING_MESSAGE} Intento ${attempt.failures} de ${ADMIN_FAILED_LOGIN_LIMIT}.`,
+      attempts: attempt.failures,
+      attemptsRemaining: attempt.remaining
+    });
+  }
+
   clearAdminLoginFailures(req);
   setSessionCookie(res, signToken(user));
-  res.json({
+  return sendAdminLoginJson(res, 200, {
     user: { id: user.id, username: user.username, name: user.name, role: user.role }
   });
-}));
+}
+
+app.post("/api/auth/admin-login", loginLimiter, blockAdminLoginIfNeeded, asyncHandler(adminLoginHandler));
+app.post("/api/admin/login", loginLimiter, blockAdminLoginIfNeeded, asyncHandler(adminLoginHandler));
 
 app.post("/api/auth/logout", (_req, res) => {
   res.clearCookie(SESSION_COOKIE, { httpOnly: true, sameSite: "strict", secure: IS_PRODUCTION, path: "/" });

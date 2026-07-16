@@ -366,12 +366,14 @@
         async function api(path, options = {}) {
             const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
             let response;
+            console.log("[admin-api] request", { path, method: options.method || "GET" });
             try {
                 response = await fetch(path, { ...options, headers, credentials: "same-origin" });
             } catch {
                 throw new Error("No se encontró el servidor seguro. Abre el panel desde el dominio desplegado de GARCITA STORE.");
             }
             const data = await response.json().catch(() => ({}));
+            console.log("[admin-api] response", { path, status: response.status, ok: response.ok, data });
             if (!response.ok) {
                 if (response.status === 401 && state.authenticated) logout(false);
                 throw new Error(data.error || "No se pudo completar la acción.");
@@ -556,12 +558,16 @@
             event.preventDefault();
             $("#loginError").textContent = "";
             try {
-                const data = await api("/api/auth/admin-login", {
+                const loginEndpoint = "/api/auth/admin-login";
+                console.log("[admin-login] boton Iniciar sesion llama endpoint", loginEndpoint);
+                const data = await api(loginEndpoint, {
                     method: "POST",
                     body: JSON.stringify({ username: $("#loginUser").value, password: $("#loginPassword").value })
                 });
+                console.log("[admin-login] login correcto", data);
                 showAdmin();
             } catch (error) {
+                console.error("[admin-login] login fallo", error);
                 $("#loginError").textContent = error.message;
             }
         });
