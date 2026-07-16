@@ -43,10 +43,10 @@ npm start
 Ese comando ejecuta:
 
 ```bash
-node scripts/setup-db.js && node server.js
+node server.js
 ```
 
-Esto crea la base si tiene permiso, crea todas las tablas, agrega el admin inicial y carga los productos de GARCITA STORE.
+Express inicia primero y responde `/health` con 200 aunque MySQL todavia no este enlazado. Luego el servidor intenta conectar MySQL en segundo plano; cuando la conexion este disponible, crea la base si tiene permiso, crea todas las tablas, agrega el admin inicial y carga los productos de GARCITA STORE.
 
 El archivo `railway.json` fuerza `npm start` y usa `/health` como healthcheck.
 

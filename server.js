@@ -9,7 +9,7 @@ const rateLimit = require("express-rate-limit");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const mysql = require("mysql2/promise");
-const { getDbConfig, printEnvDiagnostics } = require("./scripts/db-config");
+const { getDbConfig, hasMysqlConfig, printEnvDiagnostics } = require("./scripts/db-config");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
@@ -22,6 +22,7 @@ const BRAND_LOGO = "assets/garcita-logo.svg";
 const WHATSAPP_GROUP = "https://chat.whatsapp.com/DaEn2118QELDryq0jOH4U3";
 const WHATSAPP_NUMBER = "5216863387186";
 const CHAT_CLICK_EVENT = "whatsapp_click";
+const MYSQL_RETRY_MS = Math.max(5000, Number(process.env.MYSQL_RETRY_MS || 30000));
 
 const DEFAULT_PRODUCTS = [
   {
@@ -109,17 +110,25 @@ const DEFAULT_PRODUCTS = [
   }
 ];
 
-let dbRuntimeConfig;
-try {
-  printEnvDiagnostics("server");
-  dbRuntimeConfig = getDbConfig({ includeDatabase: true, multipleStatements: true });
-} catch (error) {
-  console.error("Configuracion MySQL invalida:");
-  console.error(error.stack || error);
-  process.exit(1);
+class DatabaseUnavailableError extends Error {
+  constructor(message = "Base de datos no disponible.") {
+    super(message);
+    this.name = "DatabaseUnavailableError";
+    this.statusCode = 503;
+  }
 }
-const { config: poolConfig, database: DATABASE_NAME } = dbRuntimeConfig;
-const pool = mysql.createPool(poolConfig);
+
+let pool = null;
+let dbRetryTimer = null;
+let dbInitializationPromise = null;
+const dbState = {
+  status: "starting",
+  source: null,
+  database: null,
+  lastAttemptAt: null,
+  lastReadyAt: null,
+  lastError: null
+};
 
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
@@ -193,8 +202,47 @@ function asyncHandler(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 }
 
+function serializeDbState() {
+  return {
+    status: dbState.status,
+    database: dbState.database,
+    source: dbState.source,
+    lastAttemptAt: dbState.lastAttemptAt,
+    lastReadyAt: dbState.lastReadyAt,
+    lastError: dbState.lastError
+  };
+}
+
+function setDbState(status, updates = {}) {
+  dbState.status = status;
+  Object.assign(dbState, updates);
+}
+
+function isDatabaseReady() {
+  return Boolean(pool) && dbState.status === "ready";
+}
+
+function requirePool() {
+  if (!isDatabaseReady()) {
+    throw new DatabaseUnavailableError("La base de datos aun no esta disponible. El servidor sigue activo.");
+  }
+  return pool;
+}
+
 function query(sql, params = {}) {
-  return pool.execute(sql, params).then(([rows]) => rows);
+  return requirePool().execute(sql, params).then(([rows]) => rows);
+}
+
+async function closePool() {
+  if (!pool) return;
+  const previousPool = pool;
+  pool = null;
+  try {
+    await previousPool.end();
+  } catch (error) {
+    console.warn("No se pudo cerrar el pool MySQL anterior:");
+    console.warn(error.stack || error);
+  }
 }
 
 async function createDatabaseIfNeeded() {
@@ -213,7 +261,7 @@ async function createDatabaseIfNeeded() {
 async function applySchema() {
   await createDatabaseIfNeeded();
   const schemaSql = fs.readFileSync(path.join(__dirname, "database", "schema.sql"), "utf8");
-  await pool.query(schemaSql);
+  await requirePool().query(schemaSql);
 }
 
 async function ensureSchema() {
@@ -234,6 +282,65 @@ async function ensureSchema() {
   }
 
   await query("ALTER TABLE analytics_events MODIFY event_type ENUM('page_view', 'whatsapp_click', 'buy_click') NOT NULL");
+}
+
+function scheduleDatabaseInitialization(delayMs = MYSQL_RETRY_MS) {
+  if (dbRetryTimer) clearTimeout(dbRetryTimer);
+  dbRetryTimer = setTimeout(() => {
+    dbRetryTimer = null;
+    initializeDatabaseInBackground();
+  }, delayMs);
+  dbRetryTimer.unref();
+}
+
+async function initializeDatabaseInBackground() {
+  if (dbInitializationPromise) return dbInitializationPromise;
+
+  dbInitializationPromise = (async () => {
+    setDbState("connecting", {
+      lastAttemptAt: new Date().toISOString(),
+      lastError: null
+    });
+    printEnvDiagnostics("server-db");
+
+    try {
+      const { config, database, source } = getDbConfig({ includeDatabase: true, multipleStatements: true });
+      await closePool();
+      pool = mysql.createPool(config);
+      setDbState("connecting", { database, source });
+
+      await applySchema();
+      await requirePool().query("SELECT 1");
+      await ensureSchema();
+      await syncConfiguredAdmin();
+      await syncBrandDefaults();
+      await syncDefaultCatalog();
+
+      setDbState("ready", {
+        database,
+        source,
+        lastReadyAt: new Date().toISOString(),
+        lastError: null
+      });
+      console.log(`MySQL conectado correctamente. Base: ${database}. Fuente: ${source}.`);
+    } catch (error) {
+      await closePool();
+      setDbState(hasMysqlConfig() ? "error" : "waiting_for_config", {
+        database: null,
+        source: null,
+        lastError: error.stack || String(error)
+      });
+      console.error("MySQL no esta listo. El servidor HTTP seguira activo y se reintentara en segundo plano:");
+      console.error(error.stack || error);
+      scheduleDatabaseInitialization();
+    }
+  })();
+
+  try {
+    await dbInitializationPromise;
+  } finally {
+    dbInitializationPromise = null;
+  }
 }
 
 function signToken(user) {
@@ -265,6 +372,7 @@ async function auth(req, res, next) {
   const cookies = parseCookies(req);
   const token = header.startsWith("Bearer ") ? header.slice(7) : cookies[SESSION_COOKIE] || "";
   if (!token) return res.status(401).json({ error: "Debes iniciar sesion." });
+  if (!isDatabaseReady()) return next(new DatabaseUnavailableError("Panel no disponible hasta que MySQL conecte."));
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     const rows = await query(
@@ -274,7 +382,8 @@ async function auth(req, res, next) {
     if (!rows.length) return res.status(401).json({ error: "Sesion desactivada. Inicia sesion nuevamente." });
     req.user = rows[0];
     next();
-  } catch {
+  } catch (error) {
+    if (error instanceof DatabaseUnavailableError) return next(error);
     res.status(401).json({ error: "Sesion invalida o vencida." });
   }
 }
@@ -366,23 +475,54 @@ function productJson(product) {
   };
 }
 
+function defaultProductJson(product, index) {
+  return {
+    id: index + 1,
+    name: product.name,
+    category: product.category,
+    description: product.description,
+    imageUrl: product.imageUrl,
+    oldPrice: product.oldPrice,
+    price: product.price,
+    badge: product.badge,
+    active: true,
+    sortOrder: index,
+    options: normalizeOptions(product.options)
+  };
+}
+
 async function getSetting(key, fallback = "") {
-  const rows = await query("SELECT setting_value FROM settings WHERE setting_key = :key LIMIT 1", { key });
-  return rows[0]?.setting_value || fallback;
+  if (!isDatabaseReady()) return fallback;
+  try {
+    const rows = await query("SELECT setting_value FROM settings WHERE setting_key = :key LIMIT 1", { key });
+    return rows[0]?.setting_value || fallback;
+  } catch (error) {
+    console.warn(`No se pudo leer setting "${key}". Usando valor por defecto.`);
+    console.warn(error.stack || error);
+    return fallback;
+  }
 }
 
 async function logEvent(eventType, data = {}) {
-  await query(
-    `INSERT INTO analytics_events (event_type, source, session_id, product_id, metadata)
-     VALUES (:eventType, :source, :sessionId, :productId, :metadata)`,
-    {
-      eventType,
-      source: cleanText(data.source) || null,
-      sessionId: cleanText(data.sessionId) || null,
-      productId: data.productId ? Number(data.productId) : null,
-      metadata: JSON.stringify(data.metadata || {})
-    }
-  );
+  if (!isDatabaseReady()) return false;
+  try {
+    await query(
+      `INSERT INTO analytics_events (event_type, source, session_id, product_id, metadata)
+       VALUES (:eventType, :source, :sessionId, :productId, :metadata)`,
+      {
+        eventType,
+        source: cleanText(data.source) || null,
+        sessionId: cleanText(data.sessionId) || null,
+        productId: data.productId ? Number(data.productId) : null,
+        metadata: JSON.stringify(data.metadata || {})
+      }
+    );
+    return true;
+  } catch (error) {
+    console.warn("No se pudo guardar evento analitico:");
+    console.warn(error.stack || error);
+    return false;
+  }
 }
 
 function markActive(sessionId) {
@@ -510,6 +650,9 @@ app.get("/api/settings", asyncHandler(async (_req, res) => {
 }));
 
 app.get("/api/products", asyncHandler(async (_req, res) => {
+  if (!isDatabaseReady()) {
+    return res.json(DEFAULT_PRODUCTS.map(defaultProductJson));
+  }
   const rows = await query("SELECT * FROM products WHERE active = 1 ORDER BY sort_order ASC, id DESC");
   res.json(rows.map(productJson));
 }));
@@ -550,6 +693,30 @@ app.post("/api/track/whatsapp-click", asyncHandler(trackChatClick));
 
 app.post("/api/sales/lead", asyncHandler(async (req, res) => {
   const productId = Number(req.body.productId || 0);
+  if (!isDatabaseReady()) {
+    const product = DEFAULT_PRODUCTS[productId - 1];
+    if (!product) return res.status(404).json({ error: "Producto no encontrado." });
+    const productOptions = normalizeOptions(product.options);
+    const selectedOption = cleanLimited(req.body.selectedOption, "", 220);
+    const selectedPrice = cleanLimited(req.body.selectedPrice, "", 80);
+    const selectedLabel = selectedOption
+      ? `${selectedOption}${selectedPrice ? ` - ${selectedPrice}` : ""}`
+      : productOptions[0]
+        ? `${productOptions[0].label}${productOptions[0].price ? ` - ${productOptions[0].price}` : ""}`
+        : null;
+    await logEvent("buy_click", {
+      sessionId: req.body.sessionId,
+      source: "producto",
+      productId,
+      metadata: { productName: product.name, selectedOption: selectedLabel, offline: true }
+    });
+    return res.status(201).json({
+      id: null,
+      offline: true,
+      whatsappGroup: WHATSAPP_GROUP
+    });
+  }
+
   const rows = await query("SELECT * FROM products WHERE id = :id AND active = 1 LIMIT 1", { id: productId });
   if (!rows.length) return res.status(404).json({ error: "Producto no encontrado." });
   const product = rows[0];
@@ -685,10 +852,13 @@ app.get("/api/admin/reports", auth, adminOnly, asyncHandler(async (_req, res) =>
   });
 }));
 
-app.get("/health", asyncHandler(async (_req, res) => {
-  await query("SELECT 1 AS ok");
-  res.json({ ok: true, service: BRAND_NAME, database: DATABASE_NAME });
-}));
+app.get("/health", (_req, res) => {
+  res.status(200).json({
+    ok: true,
+    service: BRAND_NAME,
+    database: serializeDbState()
+  });
+});
 
 app.use(express.static(__dirname, { dotfiles: "ignore" }));
 app.get("/admin", (_req, res) => res.sendFile(path.join(__dirname, "admin.html")));
@@ -697,19 +867,17 @@ app.get("*", (_req, res) => res.sendFile(path.join(__dirname, "index.html")));
 app.use((error, _req, res, _next) => {
   console.error("Error HTTP no controlado:");
   console.error(error.stack || error);
-  res.status(500).json({
-    error: "Ocurrio un error en el servidor.",
+  const statusCode = error.statusCode || 500;
+  res.status(statusCode).json({
+    error: error instanceof DatabaseUnavailableError
+      ? "Base de datos no disponible. La pagina sigue activa mientras se reintenta la conexion."
+      : "Ocurrio un error en el servidor.",
+    database: error instanceof DatabaseUnavailableError ? serializeDbState() : undefined,
     detail: IS_PRODUCTION ? undefined : (error.stack || String(error))
   });
 });
 
 async function start() {
-  await applySchema();
-  await pool.query("SELECT 1");
-  await ensureSchema();
-  await syncConfiguredAdmin();
-  await syncBrandDefaults();
-  await syncDefaultCatalog();
   setInterval(() => {
     activeVisitorCount();
     broadcast("active-visitors", { activeVisitors: activeVisitorCount() });
@@ -721,7 +889,8 @@ async function start() {
       const activePort = typeof address === "object" && address ? address.port : PORT;
       console.log(`${BRAND_NAME} iniciado correctamente.`);
       console.log(`Puerto: ${activePort}`);
-      console.log(`Base MySQL: ${DATABASE_NAME}`);
+      console.log("El healthcheck /health responde aunque MySQL no este disponible.");
+      initializeDatabaseInBackground();
       resolve(server);
     });
   });
@@ -731,7 +900,6 @@ if (require.main === module) {
   start().catch((error) => {
     console.error("No se pudo iniciar el servidor:");
     console.error(error.stack || error);
-    process.exit(1);
   });
 }
 

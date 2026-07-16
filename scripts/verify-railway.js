@@ -23,6 +23,17 @@ const requiredFiles = [
   "assets/garcita-fragmentos.jpeg"
 ];
 
+const legacyDbKeys = [
+  ["DB", "HOST"].join("_"),
+  ["DB", "PORT"].join("_"),
+  ["DB", "USER"].join("_"),
+  ["DB", "PASSWORD"].join("_"),
+  ["DB", "NAME"].join("_"),
+  ["DB", "DATABASE"].join("_"),
+  ["DB", "URL"].join("_"),
+  ["DATABASE", "URL"].join("_")
+];
+
 function fail(message) {
   throw new Error(message);
 }
@@ -33,7 +44,7 @@ function read(relativePath) {
 
 function resetMysqlEnv(overrides = {}) {
   for (const key of Object.keys(process.env)) {
-    if (/MYSQL|DATABASE|DB_/i.test(key)) delete process.env[key];
+    if (/^MYSQL/i.test(key) || legacyDbKeys.includes(key)) delete process.env[key];
   }
   Object.assign(process.env, overrides);
 }
@@ -43,8 +54,14 @@ for (const file of requiredFiles) {
 }
 
 const packageJson = JSON.parse(read("package.json"));
-if (packageJson.scripts?.start !== "node scripts/setup-db.js && node server.js") {
-  fail("package.json debe tener start = node scripts/setup-db.js && node server.js");
+if (packageJson.scripts?.start !== "node server.js") {
+  fail("package.json debe tener start = node server.js");
+}
+if (packageJson.scripts?.["deploy-start"] !== "node server.js") {
+  fail("package.json debe tener deploy-start = node server.js");
+}
+if (String(packageJson.scripts?.start || "").includes("setup-db")) {
+  fail("npm start no debe ejecutar setup-db antes de Express");
 }
 if (packageJson.scripts?.["simulate:railway"] !== "node scripts/simulate-railway-start.js") {
   fail("package.json debe incluir simulate:railway");
@@ -72,11 +89,16 @@ for (const file of [
 }
 new vm.Script(read("assets/garcita-hero-3d.js").replace(/^import[^\n]+\n/, ""), { filename: "assets/garcita-hero-3d.js" });
 
+const serverSource = read("server.js");
+if (serverSource.includes("process.exit(")) fail("server.js no debe cerrar el proceso con process.exit()");
+if (!serverSource.includes("initializeDatabaseInBackground();")) fail("server.js debe inicializar MySQL en segundo plano");
+if (!serverSource.includes("res.status(200).json")) fail("/health debe responder 200 sin consultar MySQL");
+
 const dbConfigSource = read("scripts/db-config.js");
 const forbiddenHelperName = ["require", "Value"].join("");
 if (dbConfigSource.includes(forbiddenHelperName)) fail(`db-config.js no debe usar ${forbiddenHelperName}()`);
-if (dbConfigSource.indexOf("getMysqlUrlConfig") > dbConfigSource.indexOf("MYSQLHOST/MYSQLUSER/MYSQLDATABASE")) {
-  fail("db-config.js debe intentar MYSQL_URL antes de MYSQLHOST");
+for (const key of legacyDbKeys) {
+  if (dbConfigSource.includes(key)) fail(`db-config.js no debe depender de ${key}`);
 }
 
 const originalEnv = { ...process.env };
@@ -102,6 +124,18 @@ const diagnosticsText = JSON.stringify(getSafeEnvDiagnostics(process.env));
 if (diagnosticsText.includes("secret") || diagnosticsText.includes("wrong-password")) {
   fail("El diagnostico de entorno esta exponiendo secretos");
 }
+
+const legacyOverrides = {};
+for (const key of legacyDbKeys) legacyOverrides[key] = key.endsWith("PASSWORD") ? "legacy-secret" : "legacy-value";
+resetMysqlEnv(legacyOverrides);
+let missingConfigFailed = false;
+try {
+  getDbConfig({ includeDatabase: true, multipleStatements: true });
+} catch (error) {
+  missingConfigFailed = true;
+  if (!String(error.stack || error).includes("MYSQL_URL")) fail("El error de configuracion debe mencionar MYSQL_URL");
+}
+if (!missingConfigFailed) fail("db-config no debe conectarse usando variables antiguas");
 
 resetMysqlEnv({
   MYSQLHOST: "mysql.railway.internal",

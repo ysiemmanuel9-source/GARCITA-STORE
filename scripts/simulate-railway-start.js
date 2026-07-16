@@ -1,68 +1,68 @@
-const Module = require("module");
+const http = require("http");
 
-const originalLoad = Module._load;
-let insertId = 1;
+const MYSQL_KEYS = [
+  "MYSQL_URL",
+  "MYSQLHOST",
+  "MYSQLPORT",
+  "MYSQLUSER",
+  "MYSQLPASSWORD",
+  "MYSQLDATABASE"
+];
 
-function rowsFor(sql) {
-  const normalized = String(sql || "").trim().toLowerCase();
-  if (normalized.includes("information_schema.columns")) return [];
-  if (normalized.startsWith("select id from users")) return [];
-  if (normalized.startsWith("select id, name from products")) return [];
-  if (normalized.startsWith("select 1")) return [{ ok: 1 }];
-  if (normalized.startsWith("insert")) return { insertId: insertId += 1, affectedRows: 1 };
-  if (normalized.startsWith("update") || normalized.startsWith("alter") || normalized.startsWith("create")) {
-    return { affectedRows: 1 };
-  }
-  return [];
+function clearMysqlEnv() {
+  for (const key of MYSQL_KEYS) delete process.env[key];
 }
 
-const fakeMysql = {
-  createPool() {
-    return {
-      execute: async (sql) => [rowsFor(sql), []],
-      query: async (sql) => [rowsFor(sql), []],
-      end: async () => {}
-    };
-  },
-  createConnection: async () => ({
-    query: async (sql) => [rowsFor(sql), []],
-    end: async () => {}
-  })
-};
-
-Module._load = function patchedLoad(request, parent, isMain) {
-  if (request === "mysql2/promise") return fakeMysql;
-  return originalLoad.call(this, request, parent, isMain);
-};
+function readHealth(port) {
+  return new Promise((resolve, reject) => {
+    const request = http.get({
+      hostname: "127.0.0.1",
+      port,
+      path: "/health",
+      timeout: 5000
+    }, (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => { body += chunk; });
+      response.on("end", () => resolve({ statusCode: response.statusCode, body }));
+    });
+    request.on("timeout", () => request.destroy(new Error("Timeout consultando /health")));
+    request.on("error", reject);
+  });
+}
 
 async function main() {
-  delete process.env.MYSQLHOST;
-  delete process.env.MYSQLPORT;
-  delete process.env.MYSQLUSER;
-  delete process.env.MYSQLPASSWORD;
-  delete process.env.MYSQLDATABASE;
-
-  process.env.MYSQL_URL = "mysql://root:super-secret@mysql.railway.internal:3306/railway";
+  clearMysqlEnv();
   process.env.PORT = "0";
   process.env.HOST = "0.0.0.0";
   process.env.NODE_ENV = "production";
   process.env.JWT_SECRET = "simulated-railway-secret";
 
-  const { main: setupDatabase } = require("./setup-db");
-  await setupDatabase();
-
   const { start } = require("../server");
   const server = await start();
-  await new Promise((resolve, reject) => {
-    server.close((error) => (error ? reject(error) : resolve()));
-  });
-  console.log("Simulacion Railway OK: setup-db y server iniciaron usando MYSQL_URL sin MYSQLHOST.");
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const health = await readHealth(port);
+    if (health.statusCode !== 200) {
+      throw new Error(`/health respondio ${health.statusCode}: ${health.body}`);
+    }
+    const payload = JSON.parse(health.body);
+    if (!payload.ok || payload.database.status !== "waiting_for_config") {
+      throw new Error(`/health no reporto estado esperado: ${health.body}`);
+    }
+    console.log("Simulacion Railway OK: el servidor inicio sin variables MySQL y /health respondio 200.");
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
 }
 
 main().catch((error) => {
   console.error("Simulacion Railway fallida:");
   console.error(error.stack || error);
   process.exitCode = 1;
-}).finally(() => {
-  Module._load = originalLoad;
 });

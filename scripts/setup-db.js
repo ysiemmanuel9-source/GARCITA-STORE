@@ -7,10 +7,11 @@ const { getDbConfig, printEnvDiagnostics } = require("./db-config");
 
 async function main() {
   printEnvDiagnostics("setup-db");
-  const { config, database } = getDbConfig({ includeDatabase: false, multipleStatements: true });
-  const connection = await mysql.createConnection(config);
+  let connection;
 
   try {
+    const { config, database } = getDbConfig({ includeDatabase: false, multipleStatements: true });
+    connection = await mysql.createConnection(config);
     const sql = fs.readFileSync(path.join(__dirname, "..", "database", "schema.sql"), "utf8");
     try {
       await connection.query(`CREATE DATABASE IF NOT EXISTS \`${database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`);
@@ -20,22 +21,28 @@ async function main() {
     }
     await connection.query(`USE \`${database}\`;`);
     await connection.query(sql);
+    console.log(`Base de datos "${database}" creada/actualizada correctamente.`);
+    return true;
   } catch (error) {
-    console.error("Error aplicando schema MySQL:");
+    console.error("No se pudo crear/actualizar MySQL. El servidor web puede iniciar sin base de datos:");
     console.error(error.stack || error);
-    throw error;
+    return false;
   } finally {
-    await connection.end();
+    if (connection) {
+      try {
+        await connection.end();
+      } catch (error) {
+        console.warn("No se pudo cerrar la conexion MySQL de setup-db:");
+        console.warn(error.stack || error);
+      }
+    }
   }
-
-  console.log(`Base de datos "${database}" creada/actualizada correctamente.`);
 }
 
 if (require.main === module) {
   main().catch((error) => {
-    console.error("Error creando/actualizando la base de datos:");
+    console.error("Error inesperado en setup-db:");
     console.error(error.stack || error);
-    process.exit(1);
   });
 }
 

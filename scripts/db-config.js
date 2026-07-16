@@ -5,19 +5,7 @@ const MYSQL_ENV_KEYS = [
   "MYSQLUSER",
   "MYSQLPASSWORD",
   "MYSQLDATABASE",
-  "MYSQL_HOST",
-  "MYSQL_PORT",
-  "MYSQL_USER",
-  "MYSQL_PASSWORD",
-  "MYSQL_DATABASE",
-  "DB_URL",
-  "DATABASE_URL",
-  "DB_HOST",
-  "DB_PORT",
-  "DB_USER",
-  "DB_PASSWORD",
-  "DB_NAME",
-  "DB_DATABASE",
+  "MYSQL_CONNECTION_LIMIT",
   "PORT",
   "NODE_ENV",
   "RAILWAY_ENVIRONMENT",
@@ -80,7 +68,7 @@ function getSafeEnvDiagnostics(env = process.env) {
     };
   }
   diagnostics.detectedMysqlKeys = Object.keys(env)
-    .filter((key) => /MYSQL|DATABASE|DB_/i.test(key))
+    .filter((key) => /^MYSQL/i.test(key))
     .sort();
   return diagnostics;
 }
@@ -90,7 +78,7 @@ function printEnvDiagnostics(label = "mysql-env") {
   console.log(JSON.stringify(getSafeEnvDiagnostics(), null, 2));
 }
 
-function parseMysqlUrl(value, label) {
+function parseMysqlUrl(value, label = "MYSQL_URL") {
   if (!hasValue(value)) return null;
   try {
     const parsed = new URL(value);
@@ -110,18 +98,6 @@ function parseMysqlUrl(value, label) {
   }
 }
 
-function getMysqlUrlConfig(env) {
-  const candidates = [
-    ["MYSQL_URL", env.MYSQL_URL],
-    ["DB_URL", env.DB_URL],
-    ["DATABASE_URL", env.DATABASE_URL]
-  ];
-  for (const [label, value] of candidates) {
-    if (hasValue(value)) return parseMysqlUrl(value, label);
-  }
-  return null;
-}
-
 function getDatabaseName(value) {
   const database = firstNonEmpty(value, "garcita_store_web");
   if (!/^[A-Za-z0-9_]+$/.test(database)) {
@@ -131,9 +107,9 @@ function getDatabaseName(value) {
 }
 
 function getConnectionLimit(env) {
-  const limit = Number(firstNonEmpty(env.DB_CONNECTION_LIMIT, 10));
+  const limit = Number(firstNonEmpty(env.MYSQL_CONNECTION_LIMIT, 10));
   if (!Number.isInteger(limit) || limit <= 0) {
-    throw new Error(`DB_CONNECTION_LIMIT invalido "${env.DB_CONNECTION_LIMIT}".`);
+    throw new Error(`MYSQL_CONNECTION_LIMIT invalido "${env.MYSQL_CONNECTION_LIMIT}".`);
   }
   return limit;
 }
@@ -165,15 +141,20 @@ function buildConfig({ host, port, user, password, database, source }, options, 
   return { config, database: databaseName, source };
 }
 
+function hasMysqlConfig(env = process.env) {
+  if (hasValue(env.MYSQL_URL)) return true;
+  return hasValue(env.MYSQLHOST) && hasValue(env.MYSQLUSER) && hasValue(env.MYSQLDATABASE);
+}
+
 function buildMissingEnvError(env) {
-  const missing = ["MYSQLHOST", "MYSQLPORT", "MYSQLUSER", "MYSQLPASSWORD", "MYSQLDATABASE"]
+  const missing = ["MYSQLHOST", "MYSQLUSER", "MYSQLDATABASE"]
     .filter((key) => !hasValue(env[key]));
   const details = JSON.stringify(getSafeEnvDiagnostics(env), null, 2);
   return new Error(
     [
       `No se encontro MYSQL_URL y faltan variables MySQL requeridas: ${missing.join(", ") || "ninguna"}.`,
-      "En Railway, las variables del servicio MySQL deben estar disponibles tambien en el servicio web.",
-      "Conecta el servicio MySQL al servicio web o agrega MYSQL_URL como variable compartida/referenciada.",
+      "El servidor HTTP seguira iniciado para que Railway pueda responder /health.",
+      "Cuando enlaces MySQL al servicio web, el inicializador de fondo volvera a intentar la conexion.",
       "Diagnostico seguro de process.env:",
       details
     ].join("\n")
@@ -183,7 +164,7 @@ function buildMissingEnvError(env) {
 function getDbConfig({ includeDatabase = true, multipleStatements = false } = {}) {
   const env = process.env;
   const options = { includeDatabase, multipleStatements };
-  const urlConfig = getMysqlUrlConfig(env);
+  const urlConfig = parseMysqlUrl(env.MYSQL_URL, "MYSQL_URL");
 
   if (urlConfig) {
     return buildConfig({
@@ -192,26 +173,27 @@ function getDbConfig({ includeDatabase = true, multipleStatements = false } = {}
       port: urlConfig.port,
       user: urlConfig.user,
       password: urlConfig.password,
-      database: firstNonEmpty(urlConfig.database, env.MYSQLDATABASE, env.MYSQL_DATABASE, env.DB_NAME, env.DB_DATABASE)
+      database: firstNonEmpty(urlConfig.database, env.MYSQLDATABASE)
     }, options, env);
   }
 
-  if (!hasValue(env.MYSQLHOST) || !hasValue(env.MYSQLUSER) || !hasValue(env.MYSQLDATABASE)) {
+  if (!hasMysqlConfig(env)) {
     throw buildMissingEnvError(env);
   }
 
   return buildConfig({
     source: "MYSQLHOST/MYSQLUSER/MYSQLDATABASE",
-    host: firstNonEmpty(env.MYSQLHOST, env.MYSQL_HOST, env.DB_HOST),
-    port: firstNonEmpty(env.MYSQLPORT, env.MYSQL_PORT, env.MYSQL_TCP_PORT, env.DB_PORT, 3306),
-    user: firstNonEmpty(env.MYSQLUSER, env.MYSQL_USER, env.DB_USER),
-    password: firstDefined(env.MYSQLPASSWORD, env.MYSQL_PASSWORD, env.DB_PASSWORD, ""),
-    database: firstNonEmpty(env.MYSQLDATABASE, env.MYSQL_DATABASE, env.DB_NAME, env.DB_DATABASE)
+    host: env.MYSQLHOST,
+    port: firstNonEmpty(env.MYSQLPORT, 3306),
+    user: env.MYSQLUSER,
+    password: firstDefined(env.MYSQLPASSWORD, ""),
+    database: env.MYSQLDATABASE
   }, options, env);
 }
 
 module.exports = {
   getDbConfig,
   getSafeEnvDiagnostics,
+  hasMysqlConfig,
   printEnvDiagnostics
 };

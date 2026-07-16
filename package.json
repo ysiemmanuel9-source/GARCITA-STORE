@@ -7,10 +7,10 @@
     "node": ">=18"
   },
   "scripts": {
-    "start": "node scripts/setup-db.js && node server.js",
+    "start": "node server.js",
     "dev": "node server.js",
     "setup-db": "node scripts/setup-db.js",
-    "deploy-start": "node scripts/setup-db.js && node server.js",
+    "deploy-start": "node server.js",
     "verify": "node scripts/verify-railway.js",
     "simulate:railway": "node scripts/simulate-railway-start.js"
   },

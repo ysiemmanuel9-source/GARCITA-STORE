@@ -12,8 +12,8 @@ Proyecto listo para Railway con Express, MySQL, panel administrativo, productos 
 5. Define:
    `NODE_ENV=production`, `JWT_SECRET`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`.
 
-El comando `npm start` crea/actualiza base de datos, crea tablas, sincroniza admin inicial y levanta la pagina.
+El comando `npm start` levanta Express inmediatamente para que `/health` responda 200 en Railway. Despues intenta conectar MySQL en segundo plano, crea/actualiza tablas y sincroniza el admin inicial cuando las variables MySQL ya esten disponibles.
 
-El comando `npm run verify` revisa estructura, scripts, assets, `railway.json` y variables MySQL simuladas de Railway.
+El comando `npm run verify` revisa estructura, scripts, assets, `railway.json`, variables MySQL simuladas de Railway y el arranque sin base de datos.
 
 Mas detalle en `PASOS-RAILWAY.md`.
