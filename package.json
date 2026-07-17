@@ -1,28 +1,20 @@
 {
-  "name": "garcita-store-web",
-  "version": "1.0.0",
-  "description": "Pagina GARCITA STORE con panel admin, MySQL y reportes",
+  "name": "gaming-store-web",
+  "version": "2.0.0",
+  "description": "Tienda gaming con login, roles y MySQL",
   "main": "server.js",
-  "engines": {
-    "node": ">=18"
-  },
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
     "setup-db": "node scripts/setup-db.js",
-    "deploy-start": "node server.js",
-    "verify": "node scripts/verify-railway.js",
-    "simulate:railway": "node scripts/simulate-railway-start.js"
+    "deploy-start": "node scripts/setup-db.js && node server.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "express-rate-limit": "^7.5.0",
-    "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
-    "mysql2": "^3.11.5",
-    "nodemailer": "^9.0.3"
+    "mysql2": "^3.11.5"
   }
 }
