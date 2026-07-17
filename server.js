@@ -35,9 +35,13 @@ const WHATSAPP_GROUP = "https://chat.whatsapp.com/DaEn2118QELDryq0jOH4U3";
 const WHATSAPP_NUMBER = "5216863387186";
 const OWNER_WHATSAPP_NUMBER = "5216863387186";
 const YOAN_WHATSAPP_NUMBER = "34643502834";
-const ADMIN_RECEIPT_EMAIL = process.env.ADMIN_RECEIPT_EMAIL || "mg4563690@gmail.com";
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "mg4563690@gmail.com";
 const PURCHASE_REWARD = 15;
-const VERIFICATION_CODE_TTL_MS = 15 * 60 * 1000;
+const VERIFICATION_CODE_TTL_MS = 10 * 60 * 1000;
+const VERIFICATION_RESEND_SECONDS = 60;
+const VERIFICATION_MAX_ATTEMPTS = 5;
+const PROOF_MAX_BYTES = 5 * 1024 * 1024;
+const PROOF_ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp", "application/pdf"]);
 const CHAT_CLICK_EVENT = "whatsapp_click";
 const MYSQL_RETRY_MS = Math.max(5000, Number(process.env.MYSQL_RETRY_MS || 30000));
 const ADMIN_DEFAULT_USERNAME = "Garcita9";
@@ -48,6 +52,13 @@ const ADMIN_WARNING_MESSAGE = "Si no eres admin, no pongas mas la contrasena.";
 const ADMIN_BLOCK_MESSAGE = "Bloqueado por querer acceder al panel de admin sin permiso ni contrasena.";
 let emailTransporterCache = null;
 let emailTransporterCacheKey = "";
+const emailState = {
+  configured: false,
+  verified: false,
+  source: null,
+  lastVerifyAt: null,
+  lastError: null
+};
 
 const DEFAULT_PRODUCTS = [
   {
@@ -232,7 +243,7 @@ app.use(cors({
   credentials: true,
   origin: true
 }));
-app.use(express.json({ limit: "6mb" }));
+app.use(express.json({ limit: "8mb" }));
 app.use(rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 500,
@@ -371,6 +382,35 @@ async function applySchema(config, database) {
   await requirePool().query(schemaSql);
 }
 
+async function columnExists(tableName, columnName) {
+  const rows = await query(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :tableName AND COLUMN_NAME = :columnName`,
+    { tableName, columnName }
+  );
+  return rows.length > 0;
+}
+
+async function addColumnIfMissing(tableName, columnName, definition) {
+  if (await columnExists(tableName, columnName)) return;
+  await query(`ALTER TABLE ${tableName} ADD COLUMN ${definition}`);
+}
+
+async function indexExists(tableName, indexName) {
+  const rows = await query(
+    `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :tableName AND INDEX_NAME = :indexName
+     LIMIT 1`,
+    { tableName, indexName }
+  );
+  return rows.length > 0;
+}
+
+async function addIndexIfMissing(tableName, indexName, definition) {
+  if (await indexExists(tableName, indexName)) return;
+  await query(`ALTER TABLE ${tableName} ADD ${definition}`);
+}
+
 async function ensureSchema() {
   const productColumns = await query(
     `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
@@ -392,6 +432,24 @@ async function ensureSchema() {
   await query("ALTER TABLE analytics_events MODIFY event_type ENUM('page_view', 'discord_click', 'whatsapp_click', 'buy_click') NOT NULL");
   await query("UPDATE analytics_events SET event_type = 'whatsapp_click' WHERE event_type = 'discord_click'");
   await query("ALTER TABLE analytics_events MODIFY event_type ENUM('page_view', 'whatsapp_click', 'buy_click') NOT NULL");
+
+  await addColumnIfMissing("customer_verification_codes", "attempts", "attempts INT NOT NULL DEFAULT 0 AFTER code_hash");
+  await addColumnIfMissing("customer_verification_codes", "last_sent_at", "last_sent_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER used_at");
+  await addColumnIfMissing("customer_verification_codes", "delivery_status", "delivery_status ENUM('pending', 'sent', 'failed') NOT NULL DEFAULT 'pending' AFTER last_sent_at");
+  await addColumnIfMissing("customer_verification_codes", "delivery_error", "delivery_error TEXT NULL AFTER delivery_status");
+
+  await addColumnIfMissing("topup_requests", "order_number", "order_number VARCHAR(40) NULL AFTER id");
+  await addColumnIfMissing("topup_requests", "buyer_name", "buyer_name VARCHAR(160) NULL AFTER customer_id");
+  await addColumnIfMissing("topup_requests", "buyer_email", "buyer_email VARCHAR(180) NULL AFTER buyer_name");
+  await addColumnIfMissing("topup_requests", "product_id", "product_id INT NULL AFTER amount");
+  await addColumnIfMissing("topup_requests", "product_name", "product_name VARCHAR(180) NULL AFTER product_id");
+  await addColumnIfMissing("topup_requests", "selected_option", "selected_option VARCHAR(220) NULL AFTER product_name");
+  await addColumnIfMissing("topup_requests", "price", "price DECIMAL(10, 2) NULL AFTER selected_option");
+  await addColumnIfMissing("topup_requests", "proof_mime", "proof_mime VARCHAR(80) NULL AFTER proof_image");
+  await addColumnIfMissing("topup_requests", "proof_filename", "proof_filename VARCHAR(180) NULL AFTER proof_mime");
+  await addColumnIfMissing("topup_requests", "proof_size", "proof_size INT NULL AFTER proof_filename");
+  await addIndexIfMissing("topup_requests", "uq_topup_order_number", "UNIQUE KEY uq_topup_order_number (order_number)");
+  await addIndexIfMissing("topup_requests", "idx_topup_product", "INDEX idx_topup_product (product_id)");
 }
 
 function scheduleDatabaseInitialization(delayMs = MYSQL_RETRY_MS) {
@@ -763,6 +821,74 @@ function cleanImageUrl(value) {
   return BRAND_LOGO;
 }
 
+function safeFilename(value, fallback = "comprobante") {
+  const base = cleanLimited(value, fallback, 180).replace(/[^\w.\- ]+/g, "_").trim();
+  return base || fallback;
+}
+
+function extensionFromMime(mime) {
+  return {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "application/pdf": "pdf"
+  }[mime] || "bin";
+}
+
+function validProofMagic(buffer, mime) {
+  if (!buffer || !buffer.length) return false;
+  if (mime === "image/jpeg") return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  if (mime === "image/png") return buffer.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  if (mime === "image/webp") return buffer.slice(0, 4).toString("ascii") === "RIFF" && buffer.slice(8, 12).toString("ascii") === "WEBP";
+  if (mime === "application/pdf") return buffer.slice(0, 5).toString("ascii") === "%PDF-";
+  return false;
+}
+
+function parseProofUpload(dataUrl, filename) {
+  const raw = String(dataUrl || "");
+  if (!raw) return null;
+  const match = raw.match(/^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/);
+  if (!match) {
+    const error = new Error("El comprobante debe ser una imagen o PDF valido.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const mime = match[1].toLowerCase();
+  if (!PROOF_ALLOWED_MIME.has(mime)) {
+    const error = new Error("Solo se aceptan comprobantes JPG, PNG, WebP o PDF.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const buffer = Buffer.from(match[2].replace(/\s/g, ""), "base64");
+  if (!buffer.length || buffer.length > PROOF_MAX_BYTES) {
+    const error = new Error("El comprobante debe pesar menos de 5 MB.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!validProofMagic(buffer, mime)) {
+    const error = new Error("El comprobante no coincide con el tipo de archivo enviado.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const finalFilename = safeFilename(filename, `comprobante.${extensionFromMime(mime)}`);
+  return {
+    dataUrl: `data:${mime};base64,${buffer.toString("base64")}`,
+    mime,
+    filename: finalFilename.includes(".") ? finalFilename : `${finalFilename}.${extensionFromMime(mime)}`,
+    size: buffer.length,
+    buffer
+  };
+}
+
+function proofAttachments(proof) {
+  if (!proof) return [];
+  return [{
+    filename: proof.filename,
+    content: proof.buffer,
+    contentType: proof.mime
+  }];
+}
+
 function normalizeOptions(value) {
   const rawOptions = Array.isArray(value)
     ? value
@@ -928,8 +1054,10 @@ function smtpConfig() {
   const explicitUser = cleanText(process.env.SMTP_USER || process.env.EMAIL_USER);
   const explicitPass = String(process.env.SMTP_PASSWORD || process.env.EMAIL_PASSWORD || "");
   let host = cleanText(process.env.SMTP_HOST);
-  let port = Number(process.env.SMTP_PORT || 587);
-  let secure = String(process.env.SMTP_SECURE || "").toLowerCase() === "true" || port === 465;
+  const secureText = String(process.env.SMTP_SECURE || "").toLowerCase();
+  let secure = ["true", "1", "yes"].includes(secureText);
+  let port = Number(process.env.SMTP_PORT || 0) || (secure ? 465 : 587);
+  secure = secure || port === 465;
   let user = explicitUser || gmailUser;
   let pass = explicitPass || gmailPass;
   let source = "SMTP";
@@ -954,9 +1082,25 @@ function smtpConfig() {
     port,
     secure,
     auth: user ? { user, pass } : undefined,
-    from: cleanText(process.env.SMTP_FROM, user || ADMIN_RECEIPT_EMAIL),
+    from: cleanText(process.env.SMTP_FROM, user || ADMIN_EMAIL),
     source
   };
+}
+
+function maskEmail(value) {
+  return cleanEmail(value).replace(/^(.{2}).*(@.*)$/, "$1***$2");
+}
+
+function sanitizeEmailError(error, config = null) {
+  let text = error?.stack || error?.message || String(error);
+  const secretValues = [
+    config?.auth?.pass,
+    process.env.GMAIL_APP_PASSWORD,
+    process.env.SMTP_PASSWORD,
+    process.env.EMAIL_PASSWORD
+  ].filter(Boolean);
+  for (const secret of secretValues) text = text.split(String(secret)).join("[oculto]");
+  return text.slice(0, 2000);
 }
 
 function safeEmailConfigStatus() {
@@ -964,18 +1108,24 @@ function safeEmailConfigStatus() {
   if (!config) {
     return {
       configured: false,
+      verified: false,
       source: null,
+      lastVerifyAt: emailState.lastVerifyAt,
+      lastError: emailState.lastError,
       message: "SMTP/Gmail no configurado. Los correos se guardan en email_outbox pero no salen a Gmail."
     };
   }
   return {
     configured: true,
+    verified: emailState.verified,
     source: config.source,
     host: config.host,
     port: config.port,
     secure: config.secure,
-    user: config.auth?.user ? config.auth.user.replace(/^(.{2}).*(@.*)$/, "$1***$2") : null,
-    from: config.from
+    user: config.auth?.user ? maskEmail(config.auth.user) : null,
+    from: config.from,
+    lastVerifyAt: emailState.lastVerifyAt,
+    lastError: emailState.lastError
   };
 }
 
@@ -1001,33 +1151,241 @@ function getEmailTransporter(config) {
   return emailTransporterCache;
 }
 
-async function rememberEmail(recipientEmail, subject, body, status, errorText = null) {
-  if (!isDatabaseReady()) return;
-  await query(
-    `INSERT INTO email_outbox (recipient_email, subject, body, status, error_text, sent_at)
-     VALUES (:recipientEmail, :subject, :body, :status, :errorText, :sentAt)`,
-    {
-      recipientEmail,
-      subject,
-      body,
-      status,
-      errorText: errorText ? String(errorText).slice(0, 2000) : null,
-      sentAt: status === "sent" ? new Date() : null
-    }
-  );
+async function verifyEmailTransporterInBackground() {
+  const config = smtpConfig();
+  emailState.configured = Boolean(config);
+  emailState.verified = false;
+  emailState.source = config?.source || null;
+  emailState.lastVerifyAt = new Date().toISOString();
+  emailState.lastError = null;
+  if (!config) {
+    console.warn("[email] SMTP/Gmail no configurado. Se usara email_outbox como respaldo.");
+    return;
+  }
+  try {
+    const transporter = getEmailTransporter(config);
+    await transporter.verify();
+    emailState.verified = true;
+    emailState.lastError = null;
+    console.log(`[email] SMTP verificado correctamente usando ${config.source}.`);
+  } catch (error) {
+    const safeError = sanitizeEmailError(error, config);
+    emailState.verified = false;
+    emailState.lastError = safeError;
+    console.error(`[email] No se pudo verificar SMTP usando ${config.source}.`);
+    console.error(safeError);
+  }
 }
 
-async function sendStoreEmail(recipientEmail, subject, body) {
-  const email = cleanEmail(recipientEmail);
-  const cleanSubject = cleanLimited(subject, "", 220);
+function emailParagraphs(text) {
+  return String(text || "")
+    .split("\n")
+    .map((line) => `<p style="margin:0 0 12px;color:#f5eef0;font-size:15px;line-height:1.55;">${escapeHtml(line) || "&nbsp;"}</p>`)
+    .join("");
+}
+
+function emailInfoTable(rows = []) {
+  const body = rows
+    .filter((row) => row && row[1] !== undefined && row[1] !== null && String(row[1]).trim() !== "")
+    .map(([label, value]) => `
+      <tr>
+        <td style="padding:10px 0;color:#ff9ba5;font-size:13px;font-weight:800;text-transform:uppercase;border-bottom:1px solid rgba(255,71,87,.22);">${escapeHtml(label)}</td>
+        <td style="padding:10px 0;color:#ffffff;font-size:14px;text-align:right;border-bottom:1px solid rgba(255,71,87,.22);">${escapeHtml(value)}</td>
+      </tr>`)
+    .join("");
+  return body ? `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:14px;border-collapse:collapse;">${body}</table>` : "";
+}
+
+function emailLayout({ title, subtitle, bodyHtml, footer }) {
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>${escapeHtml(title)}</title>
+  </head>
+  <body style="margin:0;padding:0;background:#050509;font-family:Arial,Helvetica,sans-serif;color:#ffffff;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:linear-gradient(135deg,#050509 0%,#24030a 48%,#050509 100%);padding:24px 12px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:620px;background:#080b14;border:1px solid rgba(255,37,56,.45);border-radius:18px;overflow:hidden;box-shadow:0 22px 55px rgba(0,0,0,.35);">
+            <tr>
+              <td style="padding:24px 24px 12px;text-align:center;background:radial-gradient(circle at 50% 0%,rgba(255,37,56,.2),transparent 58%);">
+                <div style="display:inline-block;border:1px solid rgba(255,37,56,.65);border-radius:14px;padding:11px 18px;color:#ff3346;font-size:28px;font-weight:900;letter-spacing:1px;text-shadow:0 0 18px rgba(255,37,56,.45);">GS</div>
+                <div style="margin-top:9px;color:#ffffff;font-size:18px;font-weight:900;letter-spacing:.8px;">GARCITA VENTAS</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:16px 24px 26px;">
+                <h1 style="margin:0;color:#ffffff;font-size:28px;line-height:1.15;text-align:center;">${escapeHtml(title)}</h1>
+                ${subtitle ? `<p style="margin:10px 0 18px;color:#d8c3c8;font-size:15px;text-align:center;line-height:1.5;">${escapeHtml(subtitle)}</p>` : ""}
+                <div style="background:rgba(24,5,10,.86);border:1px solid rgba(255,71,87,.35);border-radius:14px;padding:18px;">
+                  ${bodyHtml}
+                </div>
+                <p style="margin:18px 4px 0;color:#9f8f95;font-size:12px;line-height:1.5;text-align:center;">${escapeHtml(footer || "Si no solicitaste este correo, puedes ignorarlo.")}</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+}
+
+function verificationEmail(customer, code) {
+  const text = [
+    `Hola ${customer.name},`,
+    "",
+    `Tu codigo de verificacion de ${BRAND_NAME} es: ${code}`,
+    "Expira en 10 minutos.",
+    "Si no solicitaste este codigo, ignoralo."
+  ].join("\n");
+  const html = emailLayout({
+    title: "Verifica tu correo",
+    subtitle: "Usa este codigo para activar tu cuenta y proteger tu saldo.",
+    bodyHtml: `
+      <p style="margin:0 0 12px;color:#f5eef0;font-size:16px;line-height:1.55;">Hola ${escapeHtml(customer.name)},</p>
+      <p style="margin:0 0 16px;color:#f5eef0;font-size:15px;line-height:1.55;">Este es tu codigo de verificacion:</p>
+      <div style="font-size:40px;letter-spacing:8px;font-weight:900;text-align:center;color:#ffffff;background:#03050b;border:1px solid rgba(255,37,56,.65);border-radius:14px;padding:18px 10px;margin:10px 0 16px;">${escapeHtml(code)}</div>
+      <p style="margin:0;color:#ffb3bc;font-size:14px;text-align:center;">Expira en 10 minutos y solo se puede usar una vez.</p>`,
+    footer: "Si no solicitaste este codigo, ignoralo."
+  });
+  return { text, html };
+}
+
+function genericStoreEmail({ title, subtitle, lines = [], rows = [], footer }) {
+  const text = [
+    title,
+    subtitle || "",
+    "",
+    ...lines,
+    "",
+    ...rows.map(([label, value]) => `${label}: ${value}`)
+  ].filter(Boolean).join("\n");
+  const html = emailLayout({
+    title,
+    subtitle,
+    bodyHtml: `${emailParagraphs(lines.join("\n"))}${emailInfoTable(rows)}`,
+    footer
+  });
+  return { text, html };
+}
+
+function topupReceivedAdminEmail(customer, topup) {
+  return genericStoreEmail({
+    title: "Comprobante recibido",
+    subtitle: "Hay una recarga pendiente por revisar en el panel admin.",
+    lines: ["Revisa el comprobante adjunto y aprueba o rechaza la solicitud desde el panel."],
+    rows: [
+      ["Orden", topup.orderNumber],
+      ["Comprador", customer.name],
+      ["Correo", customer.email],
+      ["Producto", topup.productName || "Recarga de saldo"],
+      ["Opcion", topup.selectedOption || "Sin opcion"],
+      ["Metodo", topup.method],
+      ["Monto", `${topup.amount.toFixed(2)} MX`],
+      ["Precio producto", topup.price ? `${topup.price.toFixed(2)} MX` : ""],
+      ["Fecha", new Date().toLocaleString("es")],
+      ["Estado", "Pendiente"]
+    ]
+  });
+}
+
+function topupReceivedClientEmail(customer, topup) {
+  return genericStoreEmail({
+    title: "Comprobante recibido",
+    subtitle: "Hemos recibido tu comprobante correctamente.",
+    lines: ["Nuestro equipo lo revisara lo antes posible. Te avisaremos por correo cuando sea aprobado o rechazado."],
+    rows: [
+      ["Orden", topup.orderNumber],
+      ["Producto", topup.productName || "Recarga de saldo"],
+      ["Metodo", topup.method],
+      ["Monto", `${topup.amount.toFixed(2)} MX`],
+      ["Estado", "Pendiente"]
+    ]
+  });
+}
+
+function topupApprovedEmail(customer, topup, balance, adminNote) {
+  return genericStoreEmail({
+    title: "Compra aprobada",
+    subtitle: "Tu compra fue aprobada. Gracias por comprar en Garcita Ventas.",
+    lines: [
+      `Hola ${customer.name},`,
+      topup.product_name ? "Tu comprobante fue aprobado y el saldo ya esta disponible para completar tu compra." : "Tu recarga fue aprobada y el saldo ya esta en tu cuenta.",
+      adminNote ? `Instrucciones o nota: ${adminNote}` : ""
+    ].filter(Boolean),
+    rows: [
+      ["Orden", topup.order_number || `#${topup.id}`],
+      ["Producto", topup.product_name || "Recarga de saldo"],
+      ["Monto agregado", `${Number(topup.amount).toFixed(2)} MX`],
+      ["Saldo actual", `${balance.toFixed(2)} MX`],
+      ["Estado", "Aprobada"]
+    ]
+  });
+}
+
+function topupRejectedEmail(customer, topup, reason) {
+  return genericStoreEmail({
+    title: "Compra rechazada",
+    subtitle: "Tu comprobante no pudo ser aprobado.",
+    lines: [
+      `Hola ${customer.name},`,
+      `Motivo del rechazo: ${reason}`,
+      "Puedes subir un nuevo comprobante desde la pagina si el pago fue correcto."
+    ],
+    rows: [
+      ["Orden", topup.order_number || `#${topup.id}`],
+      ["Producto", topup.product_name || "Recarga de saldo"],
+      ["Estado", "Rechazada"]
+    ]
+  });
+}
+
+async function rememberEmail(recipientEmail, subject, body, status, errorText = null) {
+  if (!isDatabaseReady()) return;
+  try {
+    await query(
+      `INSERT INTO email_outbox (recipient_email, subject, body, status, error_text, sent_at)
+       VALUES (:recipientEmail, :subject, :body, :status, :errorText, :sentAt)`,
+      {
+        recipientEmail,
+        subject,
+        body,
+        status,
+        errorText: errorText ? String(errorText).slice(0, 2000) : null,
+        sentAt: status === "sent" ? new Date() : null
+      }
+    );
+  } catch (error) {
+    console.warn("[email] No se pudo guardar el registro en email_outbox:");
+    console.warn(error.stack || error);
+  }
+}
+
+async function sendStoreEmail(input, subject, body) {
+  const options = typeof input === "object" && input !== null
+    ? input
+    : { to: input, subject, text: body };
+  const email = cleanEmail(options.to);
+  const cleanSubject = cleanLimited(options.subject, "", 220);
+  const text = cleanLimited(options.text || "", "", 20000);
+  const html = options.html || emailLayout({
+    title: cleanSubject,
+    bodyHtml: emailParagraphs(text),
+    footer: "Garcita Ventas"
+  });
+  const attachments = Array.isArray(options.attachments) ? options.attachments : [];
   const config = smtpConfig();
   if (!config) {
     console.warn(`[email] SMTP no configurado. Guardando correo pendiente para ${email}: ${cleanSubject}`);
-    await rememberEmail(email, cleanSubject, body, "pending", "SMTP no configurado");
+    await rememberEmail(email, cleanSubject, text, "pending", "SMTP no configurado");
     return {
       sent: false,
       queued: true,
-      reason: "SMTP/Gmail no configurado. Agrega GMAIL_USER y GMAIL_APP_PASSWORD o SMTP_HOST/SMTP_USER/SMTP_PASSWORD."
+      reason: "SMTP/Gmail no configurado en el servidor.",
+      provider: null
     };
   }
 
@@ -1037,20 +1395,17 @@ async function sendStoreEmail(recipientEmail, subject, body) {
       from: `"${BRAND_NAME}" <${config.from}>`,
       to: email,
       subject: cleanSubject,
-      text: body,
-      html: body
-        .split("\n")
-        .map((line) => line.includes("codigo de verificacion")
-          ? `<p style="font-size:18px;font-weight:700;color:#ff2538">${escapeHtml(line)}</p>`
-          : `<p>${escapeHtml(line) || "&nbsp;"}</p>`)
-        .join("")
+      text,
+      html,
+      attachments
     });
-    await rememberEmail(email, cleanSubject, body, "sent");
+    await rememberEmail(email, cleanSubject, text, "sent");
     return { sent: true, queued: false, provider: config.source };
   } catch (error) {
+    const safeError = sanitizeEmailError(error, config);
     console.error(`[email] Error enviando correo a ${email}:`);
-    console.error(error.stack || error);
-    await rememberEmail(email, cleanSubject, body, "failed", error.stack || String(error));
+    console.error(safeError);
+    await rememberEmail(email, cleanSubject, text, "failed", safeError);
     return {
       sent: false,
       queued: true,
@@ -1060,29 +1415,75 @@ async function sendStoreEmail(recipientEmail, subject, body) {
   }
 }
 
-async function sendVerificationCode(customer) {
+function resendSecondsRemaining(record) {
+  if (!record?.last_sent_at) return 0;
+  const sentAt = new Date(record.last_sent_at).getTime();
+  if (!Number.isFinite(sentAt)) return 0;
+  return Math.max(0, VERIFICATION_RESEND_SECONDS - Math.floor((Date.now() - sentAt) / 1000));
+}
+
+async function sendVerificationCode(customer, { enforceCooldown = true } = {}) {
+  const recentRows = await query(
+    `SELECT id, last_sent_at, created_at
+     FROM customer_verification_codes
+     WHERE customer_id = :customerId AND email = :email AND purpose = 'email_verification'
+       AND used_at IS NULL
+     ORDER BY id DESC
+     LIMIT 1`,
+    { customerId: customer.id, email: customer.email }
+  );
+  const remaining = enforceCooldown ? resendSecondsRemaining(recentRows[0]) : 0;
+  if (remaining > 0) {
+    const error = new Error(`Espera ${remaining} segundos antes de reenviar otro codigo.`);
+    error.statusCode = 429;
+    error.retryAfter = remaining;
+    throw error;
+  }
+
+  await query(
+    `UPDATE customer_verification_codes
+     SET used_at = NOW()
+     WHERE customer_id = :customerId AND email = :email AND purpose = 'email_verification' AND used_at IS NULL`,
+    { customerId: customer.id, email: customer.email }
+  );
+
   const code = randomCode(6);
   const codeHash = await bcrypt.hash(code, 10);
-  await query(
-    `INSERT INTO customer_verification_codes (customer_id, email, code_hash, purpose, expires_at)
-     VALUES (:customerId, :email, :codeHash, 'email_verification', :expiresAt)`,
+  const expiresAt = new Date(Date.now() + VERIFICATION_CODE_TTL_MS);
+  const result = await query(
+    `INSERT INTO customer_verification_codes
+       (customer_id, email, code_hash, attempts, purpose, expires_at, last_sent_at, delivery_status)
+     VALUES
+       (:customerId, :email, :codeHash, 0, 'email_verification', :expiresAt, NOW(), 'pending')`,
     {
       customerId: customer.id,
       email: customer.email,
       codeHash,
-      expiresAt: new Date(Date.now() + VERIFICATION_CODE_TTL_MS)
+      expiresAt
     }
   );
-  const body = [
-    `Hola ${customer.name},`,
-    "",
-    `Tu codigo de verificacion de ${BRAND_NAME} es: ${code}`,
-    "Este codigo vence en 15 minutos.",
-    "",
-    "Si no fuiste tu, ignora este correo."
-  ].join("\n");
-  const delivery = await sendStoreEmail(customer.email, `Codigo de verificacion ${BRAND_NAME}`, body);
-  return { code, delivery };
+  const emailContent = verificationEmail(customer, code);
+  const delivery = await sendStoreEmail({
+    to: customer.email,
+    subject: `Codigo de verificacion ${BRAND_NAME}`,
+    text: emailContent.text,
+    html: emailContent.html
+  });
+  await query(
+    `UPDATE customer_verification_codes
+     SET delivery_status = :status, delivery_error = :errorText
+     WHERE id = :id`,
+    {
+      id: result.insertId,
+      status: delivery.sent ? "sent" : "failed",
+      errorText: delivery.sent ? null : cleanLimited(delivery.reason, "Correo no enviado.", 1000)
+    }
+  );
+  return {
+    delivery,
+    retryAfter: VERIFICATION_RESEND_SECONDS,
+    resendAvailableAt: new Date(Date.now() + VERIFICATION_RESEND_SECONDS * 1000).toISOString()
+  };
 }
 
 async function readCustomerBalance(customerId, connection = null) {
@@ -1122,30 +1523,44 @@ async function insertLedgerEntry(connection, data) {
   return balanceAfter;
 }
 
-function receiptText(customer, order, balanceAfter) {
-  return [
-    `${BRAND_NAME} - Comprobante de compra`,
-    "",
-    `Cliente: ${customer.name}`,
-    `Correo: ${customer.email}`,
-    `Producto: ${order.productName}`,
-    `Opcion: ${order.selectedOption || "Sin opcion"}`,
-    `Precio pagado con saldo: ${normalizeAmount(order.price).toFixed(2)} MX`,
-    `Bono agregado: ${normalizeAmount(order.rewardAmount).toFixed(2)} MX`,
-    `Saldo actual: ${normalizeAmount(balanceAfter).toFixed(2)} MX`,
-    "",
-    `Comprobante: ${order.receiptCode}`,
-    `PIN/KEY: ${order.pinCode}`,
-    "",
-    "Guarda este comprobante. Para soporte, escribe a Yoan o al dueno desde los botones de la pagina."
-  ].join("\n");
+function purchaseReceiptEmail(customer, order, balanceAfter) {
+  return genericStoreEmail({
+    title: "Comprobante de compra",
+    subtitle: "Tu compra fue aprobada y pagada con saldo.",
+    lines: [
+      `Hola ${customer.name},`,
+      "Gracias por comprar en Garcita Ventas. Guarda este comprobante y tu PIN/KEY.",
+      "Para soporte, escribe a Yoan o al dueno desde los botones de la pagina."
+    ],
+    rows: [
+      ["Cliente", customer.name],
+      ["Correo", customer.email],
+      ["Producto", order.productName],
+      ["Opcion", order.selectedOption || "Sin opcion"],
+      ["Precio", `${normalizeAmount(order.price).toFixed(2)} MX`],
+      ["Bono agregado", `${normalizeAmount(order.rewardAmount).toFixed(2)} MX`],
+      ["Saldo actual", `${normalizeAmount(balanceAfter).toFixed(2)} MX`],
+      ["Comprobante", order.receiptCode],
+      ["PIN/KEY", order.pinCode]
+    ]
+  });
 }
 
 async function notifyReceipt(customer, order, balanceAfter) {
-  const body = receiptText(customer, order, balanceAfter);
+  const emailContent = purchaseReceiptEmail(customer, order, balanceAfter);
   await Promise.allSettled([
-    sendStoreEmail(customer.email, `Comprobante ${order.receiptCode} - ${BRAND_NAME}`, body),
-    sendStoreEmail(ADMIN_RECEIPT_EMAIL, `Copia venta ${order.receiptCode} - ${BRAND_NAME}`, body)
+    sendStoreEmail({
+      to: customer.email,
+      subject: `Comprobante ${order.receiptCode} - ${BRAND_NAME}`,
+      text: emailContent.text,
+      html: emailContent.html
+    }),
+    sendStoreEmail({
+      to: ADMIN_EMAIL,
+      subject: `Copia venta ${order.receiptCode} - ${BRAND_NAME}`,
+      text: emailContent.text,
+      html: emailContent.html
+    })
   ]);
 }
 
@@ -1167,6 +1582,17 @@ function selectedProductPurchase(product, selectedOption) {
     priceText: `${price} MX`,
     price
   };
+}
+
+async function generateUniqueTopupOrderNumber() {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const orderNumber = randomToken("ORD", 5);
+    const rows = await query("SELECT id FROM topup_requests WHERE order_number = :orderNumber LIMIT 1", { orderNumber });
+    if (!rows.length) return orderNumber;
+  }
+  const error = new Error("No se pudo generar un numero de orden. Intenta de nuevo.");
+  error.statusCode = 500;
+  throw error;
 }
 
 function defaultProductJson(product, index) {
@@ -1543,39 +1969,56 @@ app.post("/api/customer/register", asyncHandler(async (req, res) => {
   const verification = await sendVerificationCode(customer);
   const payload = {
     ok: true,
-    message: "Te enviamos un codigo de verificacion al correo.",
-    emailDelivery: verification.delivery
+    message: verification.delivery.sent ? "Codigo enviado." : "Correo no enviado.",
+    emailDelivery: verification.delivery,
+    retryAfter: verification.retryAfter,
+    resendAvailableAt: verification.resendAvailableAt
   };
-  if (!IS_PRODUCTION && process.env.DEV_SHOW_EMAIL_CODES === "1") payload.debugCode = verification.code;
   res.status(201).json(payload);
 }));
 
 app.post("/api/customer/verify-email", asyncHandler(async (req, res) => {
   if (!isDatabaseReady()) return databaseWriteUnavailable(res);
   const email = cleanEmail(req.body.email);
-  const code = cleanLimited(req.body.code, "", 12);
+  const code = cleanLimited(req.body.code, "", 12).replace(/\D/g, "");
+  if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: "Codigo incorrecto." });
   const customers = await query("SELECT * FROM customers WHERE email = :email AND active = 1 LIMIT 1", { email });
   if (!customers.length) return res.status(404).json({ error: "Cliente no encontrado." });
   const customer = customers[0];
   const codes = await query(
     `SELECT * FROM customer_verification_codes
      WHERE customer_id = :customerId AND email = :email AND purpose = 'email_verification'
-       AND used_at IS NULL AND expires_at > NOW()
+       AND used_at IS NULL
      ORDER BY id DESC
-     LIMIT 5`,
+     LIMIT 1`,
     { customerId: customer.id, email }
   );
 
-  let matchedCode = null;
-  for (const item of codes) {
-    if (await bcrypt.compare(code, item.code_hash)) {
-      matchedCode = item;
-      break;
-    }
+  const record = codes[0];
+  if (!record) return res.status(400).json({ error: "Codigo expirado o no solicitado." });
+  if (new Date(record.expires_at).getTime() <= Date.now()) {
+    await query("UPDATE customer_verification_codes SET used_at = NOW() WHERE id = :id", { id: record.id });
+    return res.status(400).json({ error: "Codigo expirado. Solicita uno nuevo." });
   }
-  if (!matchedCode) return res.status(400).json({ error: "Codigo invalido o vencido." });
+  if (Number(record.attempts || 0) >= VERIFICATION_MAX_ATTEMPTS) {
+    await query("UPDATE customer_verification_codes SET used_at = NOW() WHERE id = :id", { id: record.id });
+    return res.status(429).json({ error: "Demasiados intentos. Solicita un codigo nuevo." });
+  }
+  const matched = await bcrypt.compare(code, record.code_hash);
+  if (!matched) {
+    const attempts = Number(record.attempts || 0) + 1;
+    await query("UPDATE customer_verification_codes SET attempts = :attempts WHERE id = :id", {
+      attempts,
+      id: record.id
+    });
+    if (attempts >= VERIFICATION_MAX_ATTEMPTS) {
+      await query("UPDATE customer_verification_codes SET used_at = NOW() WHERE id = :id", { id: record.id });
+      return res.status(429).json({ error: "Demasiados intentos. Solicita un codigo nuevo." });
+    }
+    return res.status(400).json({ error: `Codigo incorrecto. Intentos restantes: ${VERIFICATION_MAX_ATTEMPTS - attempts}.` });
+  }
 
-  await query("UPDATE customer_verification_codes SET used_at = NOW() WHERE id = :id", { id: matchedCode.id });
+  await query("UPDATE customer_verification_codes SET used_at = NOW() WHERE id = :id", { id: record.id });
   await query("UPDATE customers SET email_verified = 1, updated_at = NOW() WHERE id = :id", { id: customer.id });
   const verifiedCustomer = { ...customer, email_verified: 1 };
   setCustomerCookie(res, signCustomerToken(verifiedCustomer));
@@ -1589,8 +2032,13 @@ app.post("/api/customer/resend-code", asyncHandler(async (req, res) => {
   if (!customers.length) return res.status(404).json({ error: "Cliente no encontrado." });
   if (customers[0].email_verified) return res.status(400).json({ error: "Ese correo ya esta verificado." });
   const verification = await sendVerificationCode(customers[0]);
-  const payload = { ok: true, message: "Codigo reenviado.", emailDelivery: verification.delivery };
-  if (!IS_PRODUCTION && process.env.DEV_SHOW_EMAIL_CODES === "1") payload.debugCode = verification.code;
+  const payload = {
+    ok: true,
+    message: verification.delivery.sent ? "Codigo reenviado." : "Correo no enviado.",
+    emailDelivery: verification.delivery,
+    retryAfter: verification.retryAfter,
+    resendAvailableAt: verification.resendAvailableAt
+  };
   res.json(payload);
 }));
 
@@ -1622,7 +2070,7 @@ app.post("/api/customer/logout", (_req, res) => {
 app.get("/api/customer/me", customerAuth, asyncHandler(async (req, res) => {
   const balance = await readCustomerBalance(req.customer.id);
   const topups = await query(
-    `SELECT id, method, amount, status, proof_note, admin_note, created_at, updated_at
+    `SELECT id, order_number, method, amount, product_name, selected_option, price, status, proof_note, admin_note, created_at, updated_at
      FROM topup_requests
      WHERE customer_id = :customerId
      ORDER BY id DESC
@@ -1631,7 +2079,7 @@ app.get("/api/customer/me", customerAuth, asyncHandler(async (req, res) => {
   );
   res.json({
     customer: safeCustomerJson(req.customer, balance),
-    topups: topups.map((item) => ({ ...item, amount: Number(item.amount) }))
+    topups: topups.map((item) => ({ ...item, amount: Number(item.amount), price: item.price == null ? null : Number(item.price) }))
   });
 }));
 
@@ -1640,39 +2088,99 @@ app.post("/api/wallet/topups", customerAuth, asyncHandler(async (req, res) => {
   const allowed = new Set(["transferencia", "oxxo", "binance"]);
   const method = cleanLimited(req.body.method, "", 40);
   const amount = normalizeAmount(req.body.amount);
-  const proofImage = cleanLimited(req.body.proofImage, "", 900000);
+  const proof = parseProofUpload(req.body.proofImage, req.body.proofFilename);
   const proofNote = cleanLimited(req.body.proofNote, "", 2000);
+  const productId = Number(req.body.productId || 0) || null;
+  let productName = cleanLimited(req.body.productName, "", 180);
+  let selectedOption = cleanLimited(req.body.selectedOption, "", 220);
+  let price = normalizeAmount(req.body.price || 0);
   if (!allowed.has(method)) return res.status(400).json({ error: "Metodo de pago invalido." });
   if (amount <= 0) return res.status(400).json({ error: "El monto de recarga debe ser mayor a 0 MX." });
-  if (proofImage && !proofImage.startsWith("data:image/")) return res.status(400).json({ error: "El comprobante debe ser una imagen valida." });
-  if (!proofImage && !proofNote) return res.status(400).json({ error: "Sube un comprobante o escribe una nota de referencia." });
+  if (!proof && !proofNote) return res.status(400).json({ error: "Sube un comprobante o escribe una nota de referencia." });
+
+  if (productId) {
+    const products = await query("SELECT * FROM products WHERE id = :id AND active = 1 LIMIT 1", { id: productId });
+    if (products.length) {
+      const product = products[0];
+      const purchase = selectedProductPurchase(product, selectedOption);
+      productName = product.name;
+      selectedOption = purchase.label || selectedOption;
+      price = purchase.price || price;
+    }
+  }
+
+  const duplicateRows = await query(
+    `SELECT id, order_number
+     FROM topup_requests
+     WHERE customer_id = :customerId AND method = :method AND amount = :amount
+       AND status = 'pending' AND created_at > (NOW() - INTERVAL 60 SECOND)
+     ORDER BY id DESC
+     LIMIT 1`,
+    { customerId: req.customer.id, method, amount }
+  );
+  if (duplicateRows.length) {
+    return res.status(409).json({
+      error: `Ya recibimos un comprobante pendiente hace unos segundos. Orden: ${duplicateRows[0].order_number || duplicateRows[0].id}.`
+    });
+  }
+
+  const orderNumber = await generateUniqueTopupOrderNumber();
 
   const result = await query(
-    `INSERT INTO topup_requests (customer_id, method, amount, proof_image, proof_note, status)
-     VALUES (:customerId, :method, :amount, :proofImage, :proofNote, 'pending')`,
+    `INSERT INTO topup_requests
+       (order_number, customer_id, buyer_name, buyer_email, method, amount, product_id, product_name,
+        selected_option, price, proof_image, proof_mime, proof_filename, proof_size, proof_note, status)
+     VALUES
+       (:orderNumber, :customerId, :buyerName, :buyerEmail, :method, :amount, :productId, :productName,
+        :selectedOption, :price, :proofImage, :proofMime, :proofFilename, :proofSize, :proofNote, 'pending')`,
     {
+      orderNumber,
       customerId: req.customer.id,
+      buyerName: req.customer.name,
+      buyerEmail: req.customer.email,
       method,
       amount,
-      proofImage: proofImage || null,
+      productId,
+      productName: productName || null,
+      selectedOption: selectedOption || null,
+      price: price > 0 ? price : null,
+      proofImage: proof?.dataUrl || null,
+      proofMime: proof?.mime || null,
+      proofFilename: proof?.filename || null,
+      proofSize: proof?.size || null,
       proofNote: proofNote || null
     }
   );
-  await sendStoreEmail(
-    ADMIN_RECEIPT_EMAIL,
-    `Recarga pendiente #${result.insertId} - ${BRAND_NAME}`,
-    [
-      "Hay una recarga pendiente por aprobar.",
-      `Cliente: ${req.customer.name} <${req.customer.email}>`,
-      `Metodo: ${method}`,
-      `Monto: ${amount.toFixed(2)} MX`,
-      `Nota: ${proofNote || "Sin nota"}`,
-      "",
-      "Entra al panel admin para revisar el comprobante y aprobar o rechazar."
-    ].join("\n")
-  );
+  const topupEmail = {
+    id: result.insertId,
+    orderNumber,
+    method,
+    amount,
+    productName,
+    selectedOption,
+    price,
+    proofNote
+  };
+  const adminEmail = topupReceivedAdminEmail(req.customer, topupEmail);
+  const clientEmail = topupReceivedClientEmail(req.customer, topupEmail);
+  await Promise.allSettled([
+    sendStoreEmail({
+      to: ADMIN_EMAIL,
+      subject: `Comprobante ${orderNumber} pendiente - ${BRAND_NAME}`,
+      text: adminEmail.text,
+      html: adminEmail.html,
+      attachments: proofAttachments(proof)
+    }),
+    sendStoreEmail({
+      to: req.customer.email,
+      subject: `Comprobante recibido ${orderNumber} - ${BRAND_NAME}`,
+      text: clientEmail.text,
+      html: clientEmail.html
+    })
+  ]);
   res.status(201).json({
     id: result.insertId,
+    orderNumber,
     status: "pending",
     message: "Comprobante recibido. El saldo se agrega cuando admin lo apruebe."
   });
@@ -1680,14 +2188,14 @@ app.post("/api/wallet/topups", customerAuth, asyncHandler(async (req, res) => {
 
 app.get("/api/wallet/topups", customerAuth, asyncHandler(async (req, res) => {
   const rows = await query(
-    `SELECT id, method, amount, status, proof_note, admin_note, created_at, updated_at
+    `SELECT id, order_number, method, amount, product_name, selected_option, price, status, proof_note, admin_note, created_at, updated_at
      FROM topup_requests
      WHERE customer_id = :customerId
      ORDER BY id DESC
      LIMIT 50`,
     { customerId: req.customer.id }
   );
-  res.json(rows.map((row) => ({ ...row, amount: Number(row.amount) })));
+  res.json(rows.map((row) => ({ ...row, amount: Number(row.amount), price: row.price == null ? null : Number(row.price) })));
 }));
 
 app.post("/api/customer/purchase", customerAuth, asyncHandler(async (req, res) => {
@@ -2065,7 +2573,7 @@ app.get("/api/admin/topups", auth, adminOnly, asyncHandler(async (_req, res) => 
      ORDER BY FIELD(t.status, 'pending', 'approved', 'rejected'), t.id DESC
      LIMIT 200`
   );
-  res.json(rows.map((row) => ({ ...row, amount: Number(row.amount) })));
+  res.json(rows.map((row) => ({ ...row, amount: Number(row.amount), price: row.price == null ? null : Number(row.price) })));
 }));
 
 app.post("/api/admin/topups/:id/approve", auth, adminOnly, asyncHandler(async (req, res) => {
@@ -2126,18 +2634,13 @@ app.post("/api/admin/topups/:id/approve", auth, adminOnly, asyncHandler(async (r
     connection.release();
   }
 
-  await sendStoreEmail(
-    customer.email,
-    `Recarga aprobada - ${BRAND_NAME}`,
-    [
-      `Hola ${customer.name},`,
-      "",
-      `Tu recarga #${topup.id} fue aprobada.`,
-      `Monto agregado: ${Number(topup.amount).toFixed(2)} MX.`,
-      `Saldo actual: ${balance.toFixed(2)} MX.`,
-      adminNote ? `Nota admin: ${adminNote}` : ""
-    ].filter(Boolean).join("\n")
-  );
+  const approvedEmail = topupApprovedEmail(customer, topup, balance, adminNote);
+  await sendStoreEmail({
+    to: customer.email,
+    subject: `Compra aprobada - ${BRAND_NAME}`,
+    text: approvedEmail.text,
+    html: approvedEmail.html
+  });
   broadcast("reports-updated", {});
   res.json({ ok: true, balance });
 }));
@@ -2170,7 +2673,7 @@ app.post("/api/admin/topups/:id/reject", auth, adminOnly, asyncHandler(async (re
       "SELECT * FROM customers WHERE id = :id AND active = 1 LIMIT 1",
       { id: topup.customer_id }
     );
-    customer = customers[0] || { name: "Cliente", email: ADMIN_RECEIPT_EMAIL };
+    customer = customers[0] || { name: "Cliente", email: ADMIN_EMAIL };
     await connection.execute(
       "UPDATE topup_requests SET status = 'rejected', admin_note = :adminNote, updated_at = NOW() WHERE id = :id",
       { adminNote, id: topupId }
@@ -2182,17 +2685,13 @@ app.post("/api/admin/topups/:id/reject", auth, adminOnly, asyncHandler(async (re
   } finally {
     connection.release();
   }
-  await sendStoreEmail(
-    customer.email,
-    `Recarga rechazada - ${BRAND_NAME}`,
-    [
-      `Hola ${customer.name},`,
-      "",
-      `Tu recarga #${topupId} fue rechazada.`,
-      `Motivo/nota: ${adminNote}`,
-      "Puedes subir un nuevo comprobante si el pago fue correcto."
-    ].join("\n")
-  );
+  const rejectedEmail = topupRejectedEmail(customer, topup, adminNote);
+  await sendStoreEmail({
+    to: customer.email,
+    subject: `Compra rechazada - ${BRAND_NAME}`,
+    text: rejectedEmail.text,
+    html: rejectedEmail.html
+  });
   res.json({ ok: true });
 }));
 
@@ -2229,7 +2728,7 @@ app.get("/api/admin/backup", auth, adminOnly, asyncHandler(async (_req, res) => 
     query("SELECT * FROM sales ORDER BY id ASC"),
     query("SELECT id, name, email, email_verified, active, last_ip, created_at, updated_at FROM customers ORDER BY id ASC"),
     query("SELECT * FROM wallet_ledger ORDER BY id ASC"),
-    query("SELECT id, customer_id, method, amount, status, proof_note, admin_note, approved_by, approved_at, created_at, updated_at FROM topup_requests ORDER BY id ASC"),
+    query("SELECT id, order_number, customer_id, buyer_name, buyer_email, method, amount, product_id, product_name, selected_option, price, status, proof_mime, proof_filename, proof_size, proof_note, admin_note, approved_by, approved_at, created_at, updated_at FROM topup_requests ORDER BY id ASC"),
     query("SELECT * FROM customer_orders ORDER BY id ASC"),
     query("SELECT * FROM settings ORDER BY setting_key ASC"),
     query("SELECT id, recipient_email, subject, status, error_text, sent_at, created_at FROM email_outbox ORDER BY id ASC")
@@ -2329,6 +2828,7 @@ app.use((error, _req, res, _next) => {
         ? (error.message || "No se pudo completar la solicitud.")
       : "Ocurrio un error en el servidor.",
     database: error instanceof DatabaseUnavailableError ? serializeDbState() : undefined,
+    retryAfter: error.retryAfter,
     detail: IS_PRODUCTION ? undefined : (error.stack || String(error))
   });
 });
@@ -2346,6 +2846,10 @@ async function start() {
       console.log(`${BRAND_NAME} iniciado correctamente.`);
       console.log(`Puerto: ${activePort}`);
       console.log("El healthcheck /health responde aunque MySQL no este disponible.");
+      verifyEmailTransporterInBackground().catch((error) => {
+        console.error("[email] Error inesperado verificando SMTP:");
+        console.error(error.stack || error);
+      });
       initializeDatabaseInBackground();
       resolve(server);
     });

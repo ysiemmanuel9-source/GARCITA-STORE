@@ -11,8 +11,10 @@
     paymentMethods: [],
     pendingPurchase: null,
     pendingEmail: "",
-    emailNotice: ""
+    emailNotice: "",
+    resendAvailableAt: 0
   };
+  let resendTimer = null;
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -53,7 +55,11 @@
       headers: { "Content-Type": "application/json", ...(options.headers || {}) }
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "No se pudo completar la accion.");
+    if (!response.ok) {
+      const error = new Error(data.error || "No se pudo completar la accion.");
+      error.data = data;
+      throw error;
+    }
     return data;
   }
 
@@ -168,8 +174,11 @@
         background: rgba(255,255,255,.06);
         border: 1px solid rgba(255,71,87,.26);
       }
+      .wallet-btn:disabled { opacity: .55; cursor: not-allowed; transform: none; }
       .wallet-btn.danger { background: rgba(255,37,56,.13); border: 1px solid rgba(255,37,56,.36); }
       .wallet-muted { color: var(--text-muted); font-size: .9rem; }
+      .wallet-countdown { color: #ff9ba5; font-weight: 800; font-size: .86rem; }
+      .wallet-proof-hint { margin-top: 6px; color: var(--text-muted); font-size: .78rem; }
       .wallet-alert {
         margin: 0 0 12px;
         border: 1px solid rgba(255,71,87,.34);
@@ -281,10 +290,46 @@
         <div class="wallet-modal-body">${body}</div>
       </div>`;
     root.classList.add("show");
+    startResendCountdown();
   }
 
   function closeModal() {
     $("#walletModalRoot")?.classList.remove("show");
+    clearInterval(resendTimer);
+    resendTimer = null;
+  }
+
+  function resendRemainingSeconds() {
+    return Math.max(0, Math.ceil((Number(state.resendAvailableAt || 0) - Date.now()) / 1000));
+  }
+
+  function setResendCooldown(result) {
+    const fromServer = result?.resendAvailableAt ? Date.parse(result.resendAvailableAt) : 0;
+    const retryMs = Number(result?.retryAfter || 60) * 1000;
+    state.resendAvailableAt = Number.isFinite(fromServer) && fromServer > Date.now()
+      ? fromServer
+      : Date.now() + retryMs;
+    startResendCountdown();
+  }
+
+  function startResendCountdown() {
+    clearInterval(resendTimer);
+    const update = () => {
+      const remaining = resendRemainingSeconds();
+      const button = $("#walletModalRoot [data-action='resend-code']");
+      const label = $("#walletModalRoot [data-resend-countdown]");
+      if (button) {
+        button.disabled = remaining > 0;
+        button.innerHTML = remaining > 0 ? `Reenviar en ${remaining}s` : "Reenviar codigo";
+      }
+      if (label) label.textContent = remaining > 0 ? `Puedes reenviar en ${remaining}s.` : "Puedes reenviar el codigo.";
+      if (remaining <= 0 && resendTimer) {
+        clearInterval(resendTimer);
+        resendTimer = null;
+      }
+    };
+    update();
+    if (resendRemainingSeconds() > 0) resendTimer = setInterval(update, 1000);
   }
 
   function accountBody(mode = "login") {
@@ -305,12 +350,13 @@
           <div class="wallet-history">
             ${topups.length ? topups.map((item) => `
               <div class="wallet-history-item">
-                <span>#${item.id} ${escapeHtml(item.method)} - ${escapeHtml(item.status)}</span>
+                <span>${escapeHtml(item.order_number || `#${item.id}`)} ${escapeHtml(item.product_name || item.method)} - ${escapeHtml(item.status)}</span>
                 <strong>${formatMoney(item.amount)}</strong>
               </div>`).join("") : '<p class="wallet-muted">Aun no tienes recargas registradas.</p>'}
           </div>
         </div>`;
     }
+    const resendRemaining = resendRemainingSeconds();
 
     return `
       <div class="wallet-card">
@@ -334,7 +380,8 @@
             <div class="wallet-field"><label>Codigo</label><input name="code" inputmode="numeric" maxlength="12" required></div>
             <div class="wallet-actions" style="grid-column:1/-1">
               <button class="wallet-btn" type="submit"><i class="fas fa-shield-check"></i> Verificar correo</button>
-              <button class="wallet-btn ghost" type="button" data-action="resend-code">Reenviar codigo</button>
+              <button class="wallet-btn ghost" type="button" data-action="resend-code" ${resendRemaining ? "disabled" : ""}>${resendRemaining ? `Reenviar en ${resendRemaining}s` : "Reenviar codigo"}</button>
+              <span class="wallet-countdown" data-resend-countdown>${resendRemaining ? `Puedes reenviar en ${resendRemaining}s.` : "Puedes reenviar el codigo."}</span>
             </div>
           </form>` : ""}
         ${mode === "login" ? `
@@ -348,10 +395,9 @@
   }
 
   function emailDeliveryNotice(result, email) {
-    if (result?.debugCode) return `Modo local: el codigo para ${email} es ${result.debugCode}.`;
     if (result?.emailDelivery?.sent) return `Codigo enviado a ${email}. Revisa Recibidos, Promociones o Spam en Gmail.`;
-    const reason = result?.emailDelivery?.reason || "falta configurar Gmail/SMTP en el servidor";
-    return `No se pudo enviar el codigo a Gmail todavia: ${reason}.`;
+    const reason = result?.emailDelivery?.reason || "el servidor no pudo confirmar SMTP";
+    return `Correo no enviado: ${reason}.`;
   }
 
   async function openAccountModal(mode = "login") {
@@ -485,12 +531,18 @@
       return;
     }
     const methods = state.paymentMethods.filter((method) => method.id !== "remitly");
+    const purchase = state.pendingPurchase || {};
+    const defaultAmount = Number(purchase.amount || 0) > 0 ? purchase.amount : "";
+    const purchaseLine = purchase.productName
+      ? `<div class="wallet-alert ok">Recarga para ${escapeHtml(purchase.productName)}${purchase.label ? ` - ${escapeHtml(purchase.label)}` : ""}</div>`
+      : "";
     modal("Recargar saldo", `
       <div class="wallet-card">
         <h4>Metodos de pago</h4>
         ${methodsMarkup()}
       </div>
       <form data-form="topup" class="wallet-card">
+        ${purchaseLine}
         <div class="wallet-grid">
           <div class="wallet-field">
             <label>Metodo</label>
@@ -500,11 +552,12 @@
           </div>
           <div class="wallet-field">
             <label>Monto MX</label>
-            <input name="amount" type="number" min="1" step="0.01" required>
+            <input name="amount" type="number" min="1" step="0.01" value="${escapeHtml(defaultAmount)}" required>
           </div>
           <div class="wallet-field" style="grid-column:1/-1">
             <label>Comprobante de pago</label>
-            <input name="proofFile" type="file" accept="image/*">
+            <input name="proofFile" type="file" accept="image/png,image/jpeg,image/webp,application/pdf">
+            <div class="wallet-proof-hint">Acepta JPG, PNG, WebP o PDF. Maximo 5 MB.</div>
           </div>
           <div class="wallet-field" style="grid-column:1/-1">
             <label>Nota o referencia</label>
@@ -521,11 +574,13 @@
 
   async function fileToDataUrl(file) {
     if (!file) return "";
+    const allowed = new Set(["image/jpeg", "image/png", "image/webp", "application/pdf"]);
+    if (!allowed.has(file.type)) throw new Error("Solo se aceptan comprobantes JPG, PNG, WebP o PDF.");
     if (file.size > 5 * 1024 * 1024) throw new Error("El comprobante debe pesar menos de 5 MB.");
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result);
-      reader.onerror = () => reject(new Error("No se pudo leer la imagen."));
+      reader.onerror = () => reject(new Error("No se pudo leer el comprobante."));
       reader.readAsDataURL(file);
     });
   }
@@ -593,6 +648,9 @@
     const form = event.target.closest("form");
     if (!form) return;
     event.preventDefault();
+    const submitButton = form.querySelector("button[type='submit']");
+    if (submitButton?.disabled) return;
+    if (submitButton) submitButton.disabled = true;
     const data = Object.fromEntries(new FormData(form).entries());
     try {
       if (form.dataset.form === "register") {
@@ -604,6 +662,7 @@
         });
         state.pendingEmail = data.email;
         state.emailNotice = emailDeliveryNotice(result, data.email);
+        setResendCooldown(result);
         showToast(state.emailNotice);
         modal("Verificar correo", accountBody("verify"));
       }
@@ -632,11 +691,18 @@
       }
       if (form.dataset.form === "topup") {
         const fileInput = form.querySelector('input[name="proofFile"]');
-        const proofImage = await fileToDataUrl(fileInput?.files?.[0]);
+        const proofFile = fileInput?.files?.[0];
+        const proofImage = await fileToDataUrl(proofFile);
+        const purchase = state.pendingPurchase || {};
         const result = await postJson("/api/wallet/topups", {
           method: data.method,
           amount: data.amount,
+          productId: purchase.productId || null,
+          productName: purchase.productName || "",
+          selectedOption: purchase.label || "",
+          price: purchase.amount || 0,
           proofImage,
+          proofFilename: proofFile?.name || "",
           proofNote: data.proofNote
         });
         await loadCustomer();
@@ -644,7 +710,10 @@
         openAccountModal();
       }
     } catch (error) {
+      if (error.data?.retryAfter) setResendCooldown(error.data);
       showToast(error.message);
+    } finally {
+      if (submitButton) submitButton.disabled = false;
     }
   }
 
@@ -663,12 +732,24 @@
       openAccountModal("login");
     }
     if (action === "resend-code") {
-      const email = $("#walletModalRoot input[name='email']")?.value || state.pendingEmail;
-      const result = await postJson("/api/customer/resend-code", { email });
-      state.pendingEmail = email;
-      state.emailNotice = emailDeliveryNotice(result, email);
-      showToast(state.emailNotice);
-      modal("Verificar correo", accountBody("verify"));
+      const actionButton = event.target.closest("[data-action='resend-code']");
+      if (actionButton?.disabled) return;
+      if (actionButton) actionButton.disabled = true;
+      try {
+        const email = $("#walletModalRoot input[name='email']")?.value || state.pendingEmail;
+        const result = await postJson("/api/customer/resend-code", { email });
+        state.pendingEmail = email;
+        state.emailNotice = emailDeliveryNotice(result, email);
+        setResendCooldown(result);
+        showToast(state.emailNotice);
+        modal("Verificar correo", accountBody("verify"));
+      } catch (error) {
+        if (error.data?.retryAfter) setResendCooldown(error.data);
+        showToast(error.message);
+        modal("Verificar correo", accountBody("verify"));
+      } finally {
+        if (actionButton) actionButton.disabled = false;
+      }
     }
   }
 

@@ -355,7 +355,7 @@
                     </div>
                     <article class="panel table-wrap">
                         <table>
-                            <thead><tr><th>ID</th><th>Cliente</th><th>Metodo</th><th>Monto</th><th>Comprobante</th><th>Estado</th><th>Acciones</th></tr></thead>
+                            <thead><tr><th>Orden</th><th>Cliente</th><th>Producto</th><th>Metodo</th><th>Monto</th><th>Comprobante</th><th>Estado</th><th>Acciones</th></tr></thead>
                             <tbody id="topupsBody"></tbody>
                         </table>
                     </article>
@@ -633,12 +633,17 @@
                 state.topups = await api("/api/admin/topups");
                 $("#topupsBody").innerHTML = state.topups.length ? state.topups.map((topup) => `
                     <tr>
-                        <td>#${topup.id}</td>
+                        <td>${escapeHtml(topup.order_number || `#${topup.id}`)}<br><span class="muted">${new Date(topup.created_at).toLocaleString("es")}</span></td>
                         <td>${escapeHtml(topup.customer_name)}<br><span class="muted">${escapeHtml(topup.customer_email)}</span></td>
+                        <td>${escapeHtml(topup.product_name || "Recarga de saldo")}<br><span class="muted">${escapeHtml(topup.selected_option || "Sin opcion")}</span></td>
                         <td>${escapeHtml(topup.method)}</td>
                         <td><strong>${money(topup.amount)}</strong></td>
                         <td>
-                            ${topup.proof_image ? `<a href="${escapeHtml(topup.proof_image)}" target="_blank"><img class="proof-thumb" src="${escapeHtml(topup.proof_image)}" alt="Comprobante"></a>` : '<span class="muted">Sin imagen</span>'}
+                            ${topup.proof_image ? (topup.proof_mime === "application/pdf"
+                              ? `<a class="code-pill" href="${escapeHtml(topup.proof_image)}" target="_blank">Ver PDF</a>`
+                              : `<a href="${escapeHtml(topup.proof_image)}" target="_blank"><img class="proof-thumb" src="${escapeHtml(topup.proof_image)}" alt="Comprobante"></a>`)
+                              : '<span class="muted">Sin archivo</span>'}
+                            ${topup.proof_filename ? `<div class="muted">${escapeHtml(topup.proof_filename)}</div>` : ""}
                             ${topup.proof_note ? `<div class="muted">${escapeHtml(topup.proof_note)}</div>` : ""}
                         </td>
                         <td><span class="status-pill ${topup.status === "pending" ? "off" : ""}">${escapeHtml(topup.status)}</span></td>
@@ -652,7 +657,7 @@
                             ` : `<span class="muted">${escapeHtml(topup.admin_note || "Revisado")}</span>`}
                         </td>
                     </tr>
-                `).join("") : '<tr><td colspan="7" class="empty">No hay recargas todavia.</td></tr>';
+                `).join("") : '<tr><td colspan="8" class="empty">No hay recargas todavia.</td></tr>';
             } catch (error) {
                 showToast(error.message, true);
             }

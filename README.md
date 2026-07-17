@@ -17,7 +17,7 @@ Proyecto listo para Railway con Express, MySQL, panel administrativo, productos 
 5. Define:
    `NODE_ENV=production`, `JWT_SECRET`, `ADMIN_USERNAME=Garcita9`, `ADMIN_PASSWORD=GarcitaStore`.
 6. Para que los codigos de verificacion y comprobantes lleguen a Gmail, agrega tambien:
-   `ADMIN_RECEIPT_EMAIL=mg4563690@gmail.com`, `GMAIL_USER`, `GMAIL_APP_PASSWORD` y `SMTP_FROM`.
+   `ADMIN_EMAIL=mg4563690@gmail.com`, `GMAIL_USER`, `GMAIL_APP_PASSWORD`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASSWORD` y `SMTP_FROM`.
 
 El comando `npm start` levanta Express inmediatamente para que `/health` responda 200 en Railway. Despues intenta conectar MySQL en segundo plano, crea/actualiza tablas y sincroniza el admin inicial cuando las variables MySQL ya esten disponibles.
 

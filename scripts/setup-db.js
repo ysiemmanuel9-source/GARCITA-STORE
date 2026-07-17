@@ -69,6 +69,35 @@ async function syncAdminUsers(connection) {
 }
 
 async function migrateExistingSchema(connection) {
+  async function columnExists(tableName, columnName) {
+    const [rows] = await connection.query(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+      [tableName, columnName]
+    );
+    return rows.length > 0;
+  }
+
+  async function addColumnIfMissing(tableName, columnName, definition) {
+    if (await columnExists(tableName, columnName)) return;
+    await connection.query(`ALTER TABLE ${tableName} ADD COLUMN ${definition}`);
+  }
+
+  async function indexExists(tableName, indexName) {
+    const [rows] = await connection.query(
+      `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?
+       LIMIT 1`,
+      [tableName, indexName]
+    );
+    return rows.length > 0;
+  }
+
+  async function addIndexIfMissing(tableName, indexName, definition) {
+    if (await indexExists(tableName, indexName)) return;
+    await connection.query(`ALTER TABLE ${tableName} ADD ${definition}`);
+  }
+
   const [productColumns] = await connection.query(
     `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'purchase_options'`
@@ -89,6 +118,24 @@ async function migrateExistingSchema(connection) {
   await connection.query("ALTER TABLE analytics_events MODIFY event_type ENUM('page_view', 'discord_click', 'whatsapp_click', 'buy_click') NOT NULL");
   await connection.query("UPDATE analytics_events SET event_type = 'whatsapp_click' WHERE event_type = 'discord_click'");
   await connection.query("ALTER TABLE analytics_events MODIFY event_type ENUM('page_view', 'whatsapp_click', 'buy_click') NOT NULL");
+
+  await addColumnIfMissing("customer_verification_codes", "attempts", "attempts INT NOT NULL DEFAULT 0 AFTER code_hash");
+  await addColumnIfMissing("customer_verification_codes", "last_sent_at", "last_sent_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER used_at");
+  await addColumnIfMissing("customer_verification_codes", "delivery_status", "delivery_status ENUM('pending', 'sent', 'failed') NOT NULL DEFAULT 'pending' AFTER last_sent_at");
+  await addColumnIfMissing("customer_verification_codes", "delivery_error", "delivery_error TEXT NULL AFTER delivery_status");
+
+  await addColumnIfMissing("topup_requests", "order_number", "order_number VARCHAR(40) NULL AFTER id");
+  await addColumnIfMissing("topup_requests", "buyer_name", "buyer_name VARCHAR(160) NULL AFTER customer_id");
+  await addColumnIfMissing("topup_requests", "buyer_email", "buyer_email VARCHAR(180) NULL AFTER buyer_name");
+  await addColumnIfMissing("topup_requests", "product_id", "product_id INT NULL AFTER amount");
+  await addColumnIfMissing("topup_requests", "product_name", "product_name VARCHAR(180) NULL AFTER product_id");
+  await addColumnIfMissing("topup_requests", "selected_option", "selected_option VARCHAR(220) NULL AFTER product_name");
+  await addColumnIfMissing("topup_requests", "price", "price DECIMAL(10, 2) NULL AFTER selected_option");
+  await addColumnIfMissing("topup_requests", "proof_mime", "proof_mime VARCHAR(80) NULL AFTER proof_image");
+  await addColumnIfMissing("topup_requests", "proof_filename", "proof_filename VARCHAR(180) NULL AFTER proof_mime");
+  await addColumnIfMissing("topup_requests", "proof_size", "proof_size INT NULL AFTER proof_filename");
+  await addIndexIfMissing("topup_requests", "uq_topup_order_number", "UNIQUE KEY uq_topup_order_number (order_number)");
+  await addIndexIfMissing("topup_requests", "idx_topup_product", "INDEX idx_topup_product (product_id)");
 }
 
 async function main() {
