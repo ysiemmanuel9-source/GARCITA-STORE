@@ -17,6 +17,7 @@ NODE_ENV=production
 JWT_SECRET=pon_un_texto_largo_y_secreto
 ADMIN_USERNAME=Garcita9
 ADMIN_PASSWORD=GarcitaStore
+ADMIN_RECEIPT_EMAIL=mg4563690@gmail.com
 ```
 
 IMPORTANTE: que los dos cuadros esten conectados en el canvas no siempre mete las variables dentro del servicio web. En Railway, el servicio web debe tener variables de referencia al servicio MySQL.
@@ -33,6 +34,19 @@ MYSQLDATABASE=${{MySQL.MYSQLDATABASE}}
 ```
 
 Si tu servicio MySQL se llama distinto, cambia `MySQL` por el nombre real del servicio.
+
+Para que lleguen correos reales de verificacion, comprobantes y PIN/KEY, agrega las variables SMTP de tu correo o proveedor:
+
+```env
+SMTP_HOST=tu_servidor_smtp
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=tu_correo
+SMTP_PASSWORD=tu_clave_smtp
+SMTP_FROM=tu_correo
+```
+
+Si no configuras SMTP, las compras y recargas no se rompen: el sistema guarda los correos en la tabla `email_outbox`, pero no puede enviarlos automaticamente.
 
 Despues de agregar o corregir variables, haz `Deploy` o `Redeploy` del servicio web. Railway aplica las variables a la siguiente ejecucion del servicio.
 
@@ -54,7 +68,13 @@ Express inicia primero y responde `/health` con 200 aunque MySQL todavia no este
 
 El archivo `railway.json` fuerza `npm start` y usa `/health` como healthcheck.
 
-## 4. Entrar al panel
+## 4. Saldo, recargas y comprobantes
+
+Los clientes crean cuenta, verifican su correo y ven su saldo en la pagina. Las recargas por transferencia STP, OXXO y Binance quedan pendientes hasta que admin revise el comprobante y pulse aprobar. Al aprobar, el saldo se agrega en MySQL con registro de auditoria.
+
+Las compras se descuentan del saldo, generan comprobante y PIN/KEY, y dan 15 MX de bono al cliente. El comprobante se envia al cliente y tambien a `ADMIN_RECEIPT_EMAIL`.
+
+## 5. Entrar al panel
 
 Cuando Railway termine el deploy:
 

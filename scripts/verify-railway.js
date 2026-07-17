@@ -21,8 +21,10 @@ const requiredFiles = [
   "assets/vendor/three.core.js",
   "assets/garcita-panel-ios.jpeg",
   "assets/garcita-diamantes.jpeg",
+  "assets/garcita-keys-mayoreo.jpeg",
   "assets/garcita-instagram.jpeg",
-  "assets/garcita-fragmentos.jpeg"
+  "assets/garcita-fragmentos.jpeg",
+  "assets/garcita-metodos-vip.jpeg"
 ];
 
 const legacyDbKeys = [
@@ -75,7 +77,19 @@ if (railwayJson.deploy?.healthcheckPath !== "/health") fail("railway.json debe u
 if (Number(railwayJson.deploy?.healthcheckTimeout || 0) < 120) fail("railway.json necesita un healthcheckTimeout amplio");
 
 const schema = read("database/schema.sql");
-for (const table of ["users", "products", "sales", "analytics_events", "settings"]) {
+for (const table of [
+  "users",
+  "products",
+  "sales",
+  "analytics_events",
+  "settings",
+  "customers",
+  "customer_verification_codes",
+  "wallet_ledger",
+  "topup_requests",
+  "customer_orders",
+  "email_outbox"
+]) {
   if (!schema.includes(`CREATE TABLE IF NOT EXISTS ${table}`)) fail(`schema.sql no crea ${table}`);
 }
 if (!schema.includes("whatsapp_click")) fail("schema.sql debe usar whatsapp_click");
@@ -232,7 +246,7 @@ if (process.env.SKIP_SIMULATED_SERVER_START !== "1") {
   const simulation = spawnSync(process.execPath, [path.join(root, "scripts", "simulate-railway-start.js")], {
     cwd: root,
     encoding: "utf8",
-    timeout: 30000,
+    timeout: 120000,
     env: { ...originalEnv }
   });
   if (simulation.error) fail(`No se pudo ejecutar la simulacion Railway: ${simulation.error.message}`);

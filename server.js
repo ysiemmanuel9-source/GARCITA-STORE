@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -9,6 +10,7 @@ const rateLimit = require("express-rate-limit");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const mysql = require("mysql2/promise");
+const nodemailer = require("nodemailer");
 const {
   getDbConfigCandidates,
   getDbSearchOrder,
@@ -26,10 +28,16 @@ const HOST = process.env.HOST || "0.0.0.0";
 const JWT_SECRET = process.env.JWT_SECRET || "garcita_store_dev_secret";
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const SESSION_COOKIE = "garcita_store_admin";
+const CUSTOMER_COOKIE = "garcita_store_customer";
 const BRAND_NAME = "GARCITA STORE";
 const BRAND_LOGO = "assets/garcita-logo.svg";
 const WHATSAPP_GROUP = "https://chat.whatsapp.com/DaEn2118QELDryq0jOH4U3";
 const WHATSAPP_NUMBER = "5216863387186";
+const OWNER_WHATSAPP_NUMBER = "5216863387186";
+const YOAN_WHATSAPP_NUMBER = "34643502834";
+const ADMIN_RECEIPT_EMAIL = process.env.ADMIN_RECEIPT_EMAIL || "mg4563690@gmail.com";
+const PURCHASE_REWARD = 15;
+const VERIFICATION_CODE_TTL_MS = 15 * 60 * 1000;
 const CHAT_CLICK_EVENT = "whatsapp_click";
 const MYSQL_RETRY_MS = Math.max(5000, Number(process.env.MYSQL_RETRY_MS || 30000));
 const ADMIN_DEFAULT_USERNAME = "Garcita9";
@@ -41,34 +49,38 @@ const ADMIN_BLOCK_MESSAGE = "Bloqueado por querer acceder al panel de admin sin 
 
 const DEFAULT_PRODUCTS = [
   {
-    name: "Panel iOS Garcita",
-    category: "panel",
-    description: "Panel premium para Free Fire con proxy iOS, aim pecho, aim cuello, aim drag, balas mágicas y visuales.",
+    key: "proxy-ios",
+    aliases: ["Panel iOS Garcita", "Proxy iOS Garcita"],
+    name: "Proxy iOS Garcita",
+    category: "Proxy",
+    description: "Proxy iOS: Aim Pecho/Aim Cuello/Aim Drag/Balas Magicas. Visuales: Holograma/Holograma Arma.",
     imageUrl: "assets/garcita-panel-ios.jpeg",
     oldPrice: null,
     price: 300,
-    badge: "panel",
+    badge: "Proxy Vip",
     options: [
-      { label: "Semanal", price: "300 MX / 18 dólares" },
-      { label: "Mensual", price: "700 MX / 40 dólares" },
-      { label: "Primer mes", price: "500 MX / 30 dólares" }
+      { label: "Semanal", price: "300 MX / 18 dolares" },
+      { label: "Mensual", price: "700 MX / 40 dolares" },
+      { label: "Primer mes", price: "500 MX / 30 dolares" }
     ]
   },
   {
-    name: "Diamantes Free Fire",
+    key: "diamantes",
+    aliases: ["Diamantes Free Fire", "Diamantes"],
+    name: "Diamantes",
     category: "diamantes",
-    description: "Recargas de diamantes básicos, VIP y combos para Free Fire. Todo se hace por ID.",
+    description: "Recargas de diamantes basicos, VIP y combos para Free Fire. Todo se hace por ID.",
     imageUrl: "assets/garcita-diamantes.jpeg",
     oldPrice: null,
     price: 15,
     badge: "diamantes",
     options: [
-      { label: "120 diamantes básicos", price: "15 MX" },
-      { label: "341 diamantes básicos", price: "50 MX" },
-      { label: "520 diamantes básicos", price: "70 MX" },
-      { label: "1166 diamantes básicos", price: "150 MX" },
-      { label: "2398 diamantes básicos", price: "330 MX" },
-      { label: "6160 diamantes básicos", price: "620 MX" },
+      { label: "120 diamantes basicos", price: "15 MX" },
+      { label: "341 diamantes basicos", price: "50 MX" },
+      { label: "520 diamantes basicos", price: "70 MX" },
+      { label: "1166 diamantes basicos", price: "150 MX" },
+      { label: "2398 diamantes basicos", price: "330 MX" },
+      { label: "6160 diamantes basicos", price: "620 MX" },
       { label: "120 diamantes VIP", price: "18 MX" },
       { label: "341 diamantes VIP", price: "70 MX" },
       { label: "572 diamantes VIP", price: "90 MX" },
@@ -81,9 +93,27 @@ const DEFAULT_PRODUCTS = [
     ]
   },
   {
+    key: "keys-mayoreo",
+    aliases: ["KEYS A MAYOREO", "Keys a mayoreo"],
+    name: "KEYS A MAYOREO",
+    category: "MAYOREO",
+    description: "Invierte y duplica tu inversion en ventas de proxys VIP.",
+    imageUrl: "assets/garcita-keys-mayoreo.jpeg",
+    oldPrice: null,
+    price: 840,
+    badge: "INVERSION",
+    options: [
+      { label: "7 KEYS SEMANALES + 1 DE REGALO", price: "840 MX" },
+      { label: "7 KEYS MENSUALES + 1 DE REGALO", price: "1150 MX" },
+      { label: "MAS DE 7 KEYS O MIXTAS", price: "840 MX minimo / cotiza por WhatsApp" }
+    ]
+  },
+  {
+    key: "seguidores-instagram",
+    aliases: ["Seguidores Instagram"],
     name: "Seguidores Instagram",
     category: "redes",
-    description: "Seguidores para Instagram por link del perfil, con garantía de 20 días.",
+    description: "Seguidores para Instagram por link del perfil, con garantia de 20 dias.",
     imageUrl: "assets/garcita-instagram.jpeg",
     oldPrice: null,
     price: 50,
@@ -99,20 +129,22 @@ const DEFAULT_PRODUCTS = [
     ]
   },
   {
-    name: "Likes, experiencia y fragmentos",
+    key: "likes-experiencia-fragmentos",
+    aliases: ["Likes, experiencia y fragmentos", "Likes/Experiencia/Honor Para Clan Etc"],
+    name: "Likes/Experiencia/Honor Para Clan Etc",
     category: "free fire",
-    description: "Likes básicos, experiencia para cuenta Free Fire, fragmentos y honor clan.",
+    description: "Likes basicos, experiencia para cuenta Free Fire, fragmentos y honor clan.",
     imageUrl: "assets/garcita-fragmentos.jpeg",
     oldPrice: null,
     price: 20,
     badge: "servicios",
     options: [
       { label: "Honor clan 380K-420K", price: "500 MX" },
-      { label: "Likes básicos 200", price: "20 MX" },
-      { label: "Likes básicos 1400", price: "65 MX" },
-      { label: "Likes básicos 2800", price: "100 MX" },
-      { label: "Likes básicos 4200", price: "140 MX" },
-      { label: "Likes básicos 6600", price: "250 MX" },
+      { label: "Likes basicos 200", price: "20 MX" },
+      { label: "Likes basicos 1400", price: "65 MX" },
+      { label: "Likes basicos 2800", price: "100 MX" },
+      { label: "Likes basicos 4200", price: "140 MX" },
+      { label: "Likes basicos 6600", price: "250 MX" },
       { label: "Experiencia cuenta FF 250K", price: "340 MX" },
       { label: "Experiencia cuenta FF 500K", price: "440 MX" },
       { label: "Experiencia cuenta FF 750K", price: "620 MX" },
@@ -121,6 +153,30 @@ const DEFAULT_PRODUCTS = [
       { label: "Fragmentos 200", price: "300 MX" },
       { label: "Fragmentos 500", price: "500 MX" },
       { label: "Fragmentos 600", price: "580 MX" }
+    ]
+  },
+  {
+    key: "metodos-vip",
+    aliases: ["METODOS VIP", "Metodos VIP"],
+    name: "METODOS VIP",
+    category: "COMBO",
+    description: "Metodos separados y combo VIP.",
+    imageUrl: "assets/garcita-metodos-vip.jpeg",
+    oldPrice: null,
+    price: 600,
+    badge: "METODOS",
+    options: [
+      { label: "1 VEZ X ID", price: "600 MX" },
+      { label: "Diamantes 20% bonos", price: "600 MX" },
+      { label: "Diamantes ilimitados", price: "600 MX" },
+      { label: "Likes FF", price: "600 MX" },
+      { label: "Honor para clanes", price: "600 MX" },
+      { label: "XP para cuentas", price: "600 MX" },
+      { label: "Metodo de fragmentos", price: "600 MX" },
+      { label: "Codigos de eventos", price: "600 MX" },
+      { label: "Seguidores", price: "600 MX" },
+      { label: "Likes para videos", price: "600 MX" },
+      { label: "Vistas", price: "600 MX" }
     ]
   }
 ];
@@ -489,6 +545,25 @@ function setSessionCookie(res, token) {
   });
 }
 
+function setCustomerCookie(res, token) {
+  res.cookie(CUSTOMER_COOKIE, token, {
+    httpOnly: true,
+    sameSite: "strict",
+    secure: IS_PRODUCTION,
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+    path: "/"
+  });
+}
+
+function signCustomerToken(customer) {
+  return jwt.sign({
+    id: customer.id,
+    role: "customer",
+    email: customer.email,
+    name: customer.name
+  }, JWT_SECRET, { expiresIn: "30d" });
+}
+
 async function auth(req, res, next) {
   const header = req.headers.authorization || "";
   const cookies = parseCookies(req);
@@ -507,6 +582,31 @@ async function auth(req, res, next) {
   } catch (error) {
     if (error instanceof DatabaseUnavailableError) return next(error);
     res.status(401).json({ error: "Sesion invalida o vencida." });
+  }
+}
+
+async function customerAuth(req, res, next) {
+  const header = req.headers.authorization || "";
+  const cookies = parseCookies(req);
+  const token = header.startsWith("Bearer ") ? header.slice(7) : cookies[CUSTOMER_COOKIE] || "";
+  if (!token) return res.status(401).json({ error: "Inicia sesion para usar tu saldo." });
+  if (!isDatabaseReady()) return next(new DatabaseUnavailableError("La base de datos de clientes aun no esta disponible."));
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (decoded.role !== "customer") return res.status(401).json({ error: "Sesion de cliente invalida." });
+    const rows = await query(
+      `SELECT id, name, email, email_verified, active, created_at
+       FROM customers
+       WHERE id = :id AND active = 1
+       LIMIT 1`,
+      { id: decoded.id }
+    );
+    if (!rows.length) return res.status(401).json({ error: "Sesion de cliente desactivada. Inicia sesion nuevamente." });
+    req.customer = rows[0];
+    next();
+  } catch (error) {
+    if (error instanceof DatabaseUnavailableError) return next(error);
+    res.status(401).json({ error: "Sesion vencida. Inicia sesion nuevamente." });
   }
 }
 
@@ -726,6 +826,273 @@ function productJson(product) {
   };
 }
 
+function cleanEmail(value) {
+  return cleanLimited(value, "", 180).toLowerCase();
+}
+
+function normalizeAmount(value) {
+  const amount = Math.round(Number(value || 0) * 100) / 100;
+  return Number.isFinite(amount) ? amount : 0;
+}
+
+function extractPriceAmount(value, fallback = 0) {
+  const text = String(value ?? "");
+  const match = text.match(/(\d+(?:[.,]\d+)?)/);
+  if (!match) return normalizeAmount(fallback);
+  return normalizeAmount(match[1].replace(",", "."));
+}
+
+function safeCustomerJson(customer, balance = 0) {
+  return {
+    id: customer.id,
+    name: customer.name,
+    email: customer.email,
+    emailVerified: Boolean(customer.email_verified),
+    active: Boolean(customer.active),
+    balance: normalizeAmount(balance)
+  };
+}
+
+function paymentMethodsJson(productContext = {}) {
+  const productLine = productContext.productName
+    ? ` Quiero pagar: ${productContext.productName}${productContext.optionText ? ` - ${productContext.optionText}` : ""}.`
+    : "";
+  const remitlyMessage = `Hola GARCITA STORE, vengo de la pagina y quiero pagar con Remitly.${productLine} Me ayudas con el proceso?`;
+  return [
+    {
+      id: "transferencia",
+      name: "Transferencia STP",
+      account: "728969000107398902",
+      receiver: "Garcita Store",
+      bank: "STP",
+      automatic: false
+    },
+    {
+      id: "oxxo",
+      name: "Deposito OXXO",
+      account: "4217 4702 5163 6722",
+      receiver: "Garcita Store",
+      automatic: false
+    },
+    {
+      id: "binance",
+      name: "Binance",
+      account: "1245653717",
+      receiver: "Garcita Store",
+      automatic: false
+    },
+    {
+      id: "remitly",
+      name: "Remitly",
+      account: "Trato directo por WhatsApp",
+      receiver: "Garcita Store",
+      automatic: false,
+      whatsappUrl: buildWhatsappUrl(OWNER_WHATSAPP_NUMBER, remitlyMessage)
+    }
+  ];
+}
+
+function buildWhatsappUrl(number, message) {
+  return `https://wa.me/${number}?text=${encodeURIComponent(message)}`;
+}
+
+function supportLinks(order) {
+  const baseMessage = [
+    "Hola, vengo de la pagina GARCITA STORE.",
+    `Ya compre: ${order.productName || order.product_name || "producto"}.`,
+    `Comprobante: ${order.receiptCode || order.receipt_code || "pendiente"}.`,
+    `Key/PIN: ${order.pinCode || order.pin_code || "pendiente"}.`,
+    "",
+    "Me dices cuando estes disponible? Te respondo y mando comprobante para que me ayudes a instalar y activar mi key."
+  ].join("\n");
+  return [
+    { label: "Yoan soporte", phone: "+34 643 50 28 34", url: buildWhatsappUrl(YOAN_WHATSAPP_NUMBER, baseMessage) },
+    { label: "Dueno Garcita", phone: "+52 1 686 338 7186", url: buildWhatsappUrl(OWNER_WHATSAPP_NUMBER, baseMessage) }
+  ];
+}
+
+function randomCode(length = 6) {
+  const max = 10 ** length;
+  return String(crypto.randomInt(0, max)).padStart(length, "0");
+}
+
+function randomToken(prefix, bytes = 5) {
+  return `${prefix}-${crypto.randomBytes(bytes).toString("hex").toUpperCase()}`;
+}
+
+function smtpConfig() {
+  const host = cleanText(process.env.SMTP_HOST);
+  if (!host) return null;
+  const port = Number(process.env.SMTP_PORT || 587);
+  const user = cleanText(process.env.SMTP_USER);
+  const pass = String(process.env.SMTP_PASSWORD || "");
+  return {
+    host,
+    port,
+    secure: String(process.env.SMTP_SECURE || "").toLowerCase() === "true" || port === 465,
+    auth: user ? { user, pass } : undefined,
+    from: cleanText(process.env.SMTP_FROM, user || ADMIN_RECEIPT_EMAIL)
+  };
+}
+
+async function rememberEmail(recipientEmail, subject, body, status, errorText = null) {
+  if (!isDatabaseReady()) return;
+  await query(
+    `INSERT INTO email_outbox (recipient_email, subject, body, status, error_text, sent_at)
+     VALUES (:recipientEmail, :subject, :body, :status, :errorText, :sentAt)`,
+    {
+      recipientEmail,
+      subject,
+      body,
+      status,
+      errorText: errorText ? String(errorText).slice(0, 2000) : null,
+      sentAt: status === "sent" ? new Date() : null
+    }
+  );
+}
+
+async function sendStoreEmail(recipientEmail, subject, body) {
+  const email = cleanEmail(recipientEmail);
+  const cleanSubject = cleanLimited(subject, "", 220);
+  const config = smtpConfig();
+  if (!config) {
+    console.warn(`[email] SMTP no configurado. Guardando correo pendiente para ${email}: ${cleanSubject}`);
+    await rememberEmail(email, cleanSubject, body, "pending", "SMTP no configurado");
+    return { sent: false, queued: true, reason: "SMTP no configurado" };
+  }
+
+  try {
+    const transporter = nodemailer.createTransport({
+      host: config.host,
+      port: config.port,
+      secure: config.secure,
+      auth: config.auth
+    });
+    await transporter.sendMail({
+      from: `"${BRAND_NAME}" <${config.from}>`,
+      to: email,
+      subject: cleanSubject,
+      text: body
+    });
+    await rememberEmail(email, cleanSubject, body, "sent");
+    return { sent: true, queued: false };
+  } catch (error) {
+    console.error(`[email] Error enviando correo a ${email}:`);
+    console.error(error.stack || error);
+    await rememberEmail(email, cleanSubject, body, "failed", error.stack || String(error));
+    return { sent: false, queued: true, reason: error.message || String(error) };
+  }
+}
+
+async function sendVerificationCode(customer) {
+  const code = randomCode(6);
+  const codeHash = await bcrypt.hash(code, 10);
+  await query(
+    `INSERT INTO customer_verification_codes (customer_id, email, code_hash, purpose, expires_at)
+     VALUES (:customerId, :email, :codeHash, 'email_verification', :expiresAt)`,
+    {
+      customerId: customer.id,
+      email: customer.email,
+      codeHash,
+      expiresAt: new Date(Date.now() + VERIFICATION_CODE_TTL_MS)
+    }
+  );
+  const body = [
+    `Hola ${customer.name},`,
+    "",
+    `Tu codigo de verificacion de ${BRAND_NAME} es: ${code}`,
+    "Este codigo vence en 15 minutos.",
+    "",
+    "Si no fuiste tu, ignora este correo."
+  ].join("\n");
+  const delivery = await sendStoreEmail(customer.email, `Codigo de verificacion ${BRAND_NAME}`, body);
+  return { code, delivery };
+}
+
+async function readCustomerBalance(customerId, connection = null) {
+  const executor = connection || requirePool();
+  const [rows] = await executor.execute(
+    "SELECT COALESCE(SUM(amount), 0) AS balance FROM wallet_ledger WHERE customer_id = :customerId",
+    { customerId }
+  );
+  return normalizeAmount(rows[0]?.balance || 0);
+}
+
+async function insertLedgerEntry(connection, data) {
+  const currentBalance = await readCustomerBalance(data.customerId, connection);
+  const amount = normalizeAmount(data.amount);
+  const balanceAfter = normalizeAmount(currentBalance + amount);
+  if (balanceAfter < 0) {
+    const error = new Error("Saldo insuficiente.");
+    error.statusCode = 400;
+    throw error;
+  }
+  await connection.execute(
+    `INSERT INTO wallet_ledger
+      (customer_id, type, amount, balance_after, reference_type, reference_id, description, created_by_admin_id)
+     VALUES
+      (:customerId, :type, :amount, :balanceAfter, :referenceType, :referenceId, :description, :adminId)`,
+    {
+      customerId: data.customerId,
+      type: data.type,
+      amount,
+      balanceAfter,
+      referenceType: data.referenceType || null,
+      referenceId: data.referenceId || null,
+      description: cleanLimited(data.description, "", 255),
+      adminId: data.adminId || null
+    }
+  );
+  return balanceAfter;
+}
+
+function receiptText(customer, order, balanceAfter) {
+  return [
+    `${BRAND_NAME} - Comprobante de compra`,
+    "",
+    `Cliente: ${customer.name}`,
+    `Correo: ${customer.email}`,
+    `Producto: ${order.productName}`,
+    `Opcion: ${order.selectedOption || "Sin opcion"}`,
+    `Precio pagado con saldo: ${normalizeAmount(order.price).toFixed(2)} MX`,
+    `Bono agregado: ${normalizeAmount(order.rewardAmount).toFixed(2)} MX`,
+    `Saldo actual: ${normalizeAmount(balanceAfter).toFixed(2)} MX`,
+    "",
+    `Comprobante: ${order.receiptCode}`,
+    `PIN/KEY: ${order.pinCode}`,
+    "",
+    "Guarda este comprobante. Para soporte, escribe a Yoan o al dueno desde los botones de la pagina."
+  ].join("\n");
+}
+
+async function notifyReceipt(customer, order, balanceAfter) {
+  const body = receiptText(customer, order, balanceAfter);
+  await Promise.allSettled([
+    sendStoreEmail(customer.email, `Comprobante ${order.receiptCode} - ${BRAND_NAME}`, body),
+    sendStoreEmail(ADMIN_RECEIPT_EMAIL, `Copia venta ${order.receiptCode} - ${BRAND_NAME}`, body)
+  ]);
+}
+
+function selectedProductPurchase(product, selectedOption) {
+  const options = parseProductOptions(product.purchase_options);
+  if (options.length) {
+    const cleanSelected = cleanLimited(selectedOption, "", 220);
+    const option = options.find((item) => item.label === cleanSelected) || options[0];
+    const price = extractPriceAmount(option.price, product.price);
+    return {
+      label: option.label,
+      priceText: option.price || `${price} MX`,
+      price
+    };
+  }
+  const price = normalizeAmount(product.price);
+  return {
+    label: cleanLimited(selectedOption, "", 220) || null,
+    priceText: `${price} MX`,
+    price
+  };
+}
+
 function defaultProductJson(product, index) {
   return {
     id: index + 1,
@@ -895,19 +1262,32 @@ async function upsertDefaultProduct(existingProduct, product, index) {
   );
 }
 
-async function syncDefaultCatalog() {
-  const rows = await query("SELECT id, name FROM products ORDER BY sort_order ASC, id ASC");
-  if (!rows.length) {
-    for (let index = 0; index < DEFAULT_PRODUCTS.length; index += 1) {
-      await upsertDefaultProduct(rows[index], DEFAULT_PRODUCTS[index], index);
-    }
-    return;
-  }
+function normalizeCatalogText(value) {
+  return cleanText(value)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
 
-  if (rows.length < DEFAULT_PRODUCTS.length) {
-    for (let index = rows.length; index < DEFAULT_PRODUCTS.length; index += 1) {
-      await upsertDefaultProduct(null, DEFAULT_PRODUCTS[index], index);
-    }
+function defaultProductMatches(row, product) {
+  const rowName = normalizeCatalogText(row.name);
+  const aliases = [product.name, ...(product.aliases || [])].map(normalizeCatalogText);
+  if (aliases.includes(rowName)) return true;
+  if (row.image_url && product.imageUrl && row.image_url === product.imageUrl) return true;
+  return false;
+}
+
+async function syncDefaultCatalog() {
+  const rows = await query("SELECT id, name, image_url, sort_order FROM products ORDER BY sort_order ASC, id ASC");
+  const usedIds = new Set();
+
+  for (let index = 0; index < DEFAULT_PRODUCTS.length; index += 1) {
+    const product = DEFAULT_PRODUCTS[index];
+    const existing = rows.find((row) => !usedIds.has(row.id) && defaultProductMatches(row, product));
+    if (existing) usedIds.add(existing.id);
+    await upsertDefaultProduct(existing || null, product, index);
   }
 }
 
@@ -1046,6 +1426,312 @@ app.get("/api/settings", asyncHandler(async (_req, res) => {
     whatsappGroup: await getSetting("whatsappGroup", WHATSAPP_GROUP),
     whatsappNumber: await getSetting("whatsappNumber", WHATSAPP_NUMBER),
     storeName: await getSetting("storeName", BRAND_NAME)
+  });
+}));
+
+app.get("/api/payment-methods", (_req, res) => {
+  res.json(paymentMethodsJson());
+});
+
+app.post("/api/customer/register", asyncHandler(async (req, res) => {
+  if (!isDatabaseReady()) return databaseWriteUnavailable(res);
+  const name = cleanLimited(req.body.name, "", 160);
+  const email = cleanEmail(req.body.email);
+  const password = String(req.body.password || "");
+  if (!name || !email || !email.includes("@")) return res.status(400).json({ error: "Nombre y correo validos son obligatorios." });
+  if (password.length < 6) return res.status(400).json({ error: "La contrasena debe tener minimo 6 caracteres." });
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  const existing = await query("SELECT * FROM customers WHERE email = :email LIMIT 1", { email });
+  let customer;
+  if (existing.length && existing[0].email_verified) {
+    return res.status(409).json({ error: "Ese correo ya esta registrado. Inicia sesion." });
+  }
+  if (existing.length) {
+    await query(
+      `UPDATE customers
+       SET name = :name, password_hash = :passwordHash, active = 1, last_ip = :lastIp, updated_at = NOW()
+       WHERE id = :id`,
+      { name, passwordHash, lastIp: requestIdentity(req), id: existing[0].id }
+    );
+    customer = { ...existing[0], name, email, id: existing[0].id };
+  } else {
+    const result = await query(
+      `INSERT INTO customers (name, email, password_hash, email_verified, active, last_ip)
+       VALUES (:name, :email, :passwordHash, 0, 1, :lastIp)`,
+      { name, email, passwordHash, lastIp: requestIdentity(req) }
+    );
+    customer = { id: result.insertId, name, email };
+  }
+
+  const verification = await sendVerificationCode(customer);
+  const payload = {
+    ok: true,
+    message: "Te enviamos un codigo de verificacion al correo.",
+    emailDelivery: verification.delivery
+  };
+  if (!IS_PRODUCTION && process.env.DEV_SHOW_EMAIL_CODES === "1") payload.debugCode = verification.code;
+  res.status(201).json(payload);
+}));
+
+app.post("/api/customer/verify-email", asyncHandler(async (req, res) => {
+  if (!isDatabaseReady()) return databaseWriteUnavailable(res);
+  const email = cleanEmail(req.body.email);
+  const code = cleanLimited(req.body.code, "", 12);
+  const customers = await query("SELECT * FROM customers WHERE email = :email AND active = 1 LIMIT 1", { email });
+  if (!customers.length) return res.status(404).json({ error: "Cliente no encontrado." });
+  const customer = customers[0];
+  const codes = await query(
+    `SELECT * FROM customer_verification_codes
+     WHERE customer_id = :customerId AND email = :email AND purpose = 'email_verification'
+       AND used_at IS NULL AND expires_at > NOW()
+     ORDER BY id DESC
+     LIMIT 5`,
+    { customerId: customer.id, email }
+  );
+
+  let matchedCode = null;
+  for (const item of codes) {
+    if (await bcrypt.compare(code, item.code_hash)) {
+      matchedCode = item;
+      break;
+    }
+  }
+  if (!matchedCode) return res.status(400).json({ error: "Codigo invalido o vencido." });
+
+  await query("UPDATE customer_verification_codes SET used_at = NOW() WHERE id = :id", { id: matchedCode.id });
+  await query("UPDATE customers SET email_verified = 1, updated_at = NOW() WHERE id = :id", { id: customer.id });
+  const verifiedCustomer = { ...customer, email_verified: 1 };
+  setCustomerCookie(res, signCustomerToken(verifiedCustomer));
+  res.json({ customer: safeCustomerJson(verifiedCustomer, await readCustomerBalance(customer.id)) });
+}));
+
+app.post("/api/customer/resend-code", asyncHandler(async (req, res) => {
+  if (!isDatabaseReady()) return databaseWriteUnavailable(res);
+  const email = cleanEmail(req.body.email);
+  const customers = await query("SELECT * FROM customers WHERE email = :email AND active = 1 LIMIT 1", { email });
+  if (!customers.length) return res.status(404).json({ error: "Cliente no encontrado." });
+  if (customers[0].email_verified) return res.status(400).json({ error: "Ese correo ya esta verificado." });
+  const verification = await sendVerificationCode(customers[0]);
+  const payload = { ok: true, message: "Codigo reenviado.", emailDelivery: verification.delivery };
+  if (!IS_PRODUCTION && process.env.DEV_SHOW_EMAIL_CODES === "1") payload.debugCode = verification.code;
+  res.json(payload);
+}));
+
+app.post("/api/customer/login", asyncHandler(async (req, res) => {
+  if (!isDatabaseReady()) return databaseWriteUnavailable(res);
+  const email = cleanEmail(req.body.email);
+  const password = String(req.body.password || "");
+  const rows = await query("SELECT * FROM customers WHERE email = :email AND active = 1 LIMIT 1", { email });
+  const customer = rows[0];
+  if (!customer || !(await bcrypt.compare(password, customer.password_hash))) {
+    return res.status(401).json({ error: "Correo o contrasena incorrectos." });
+  }
+  if (!customer.email_verified) {
+    return res.status(403).json({ error: "Verifica tu correo antes de iniciar sesion.", verificationRequired: true });
+  }
+  await query("UPDATE customers SET last_ip = :lastIp, updated_at = NOW() WHERE id = :id", {
+    lastIp: requestIdentity(req),
+    id: customer.id
+  });
+  setCustomerCookie(res, signCustomerToken(customer));
+  res.json({ customer: safeCustomerJson(customer, await readCustomerBalance(customer.id)) });
+}));
+
+app.post("/api/customer/logout", (_req, res) => {
+  res.clearCookie(CUSTOMER_COOKIE, { httpOnly: true, sameSite: "strict", secure: IS_PRODUCTION, path: "/" });
+  res.json({ ok: true });
+});
+
+app.get("/api/customer/me", customerAuth, asyncHandler(async (req, res) => {
+  const balance = await readCustomerBalance(req.customer.id);
+  const topups = await query(
+    `SELECT id, method, amount, status, proof_note, admin_note, created_at, updated_at
+     FROM topup_requests
+     WHERE customer_id = :customerId
+     ORDER BY id DESC
+     LIMIT 10`,
+    { customerId: req.customer.id }
+  );
+  res.json({
+    customer: safeCustomerJson(req.customer, balance),
+    topups: topups.map((item) => ({ ...item, amount: Number(item.amount) }))
+  });
+}));
+
+app.post("/api/wallet/topups", customerAuth, asyncHandler(async (req, res) => {
+  if (!req.customer.email_verified) return res.status(403).json({ error: "Verifica tu correo antes de recargar saldo." });
+  const allowed = new Set(["transferencia", "oxxo", "binance"]);
+  const method = cleanLimited(req.body.method, "", 40);
+  const amount = normalizeAmount(req.body.amount);
+  const proofImage = cleanLimited(req.body.proofImage, "", 900000);
+  const proofNote = cleanLimited(req.body.proofNote, "", 2000);
+  if (!allowed.has(method)) return res.status(400).json({ error: "Metodo de pago invalido." });
+  if (amount <= 0) return res.status(400).json({ error: "El monto de recarga debe ser mayor a 0 MX." });
+  if (proofImage && !proofImage.startsWith("data:image/")) return res.status(400).json({ error: "El comprobante debe ser una imagen valida." });
+  if (!proofImage && !proofNote) return res.status(400).json({ error: "Sube un comprobante o escribe una nota de referencia." });
+
+  const result = await query(
+    `INSERT INTO topup_requests (customer_id, method, amount, proof_image, proof_note, status)
+     VALUES (:customerId, :method, :amount, :proofImage, :proofNote, 'pending')`,
+    {
+      customerId: req.customer.id,
+      method,
+      amount,
+      proofImage: proofImage || null,
+      proofNote: proofNote || null
+    }
+  );
+  await sendStoreEmail(
+    ADMIN_RECEIPT_EMAIL,
+    `Recarga pendiente #${result.insertId} - ${BRAND_NAME}`,
+    [
+      "Hay una recarga pendiente por aprobar.",
+      `Cliente: ${req.customer.name} <${req.customer.email}>`,
+      `Metodo: ${method}`,
+      `Monto: ${amount.toFixed(2)} MX`,
+      `Nota: ${proofNote || "Sin nota"}`,
+      "",
+      "Entra al panel admin para revisar el comprobante y aprobar o rechazar."
+    ].join("\n")
+  );
+  res.status(201).json({
+    id: result.insertId,
+    status: "pending",
+    message: "Comprobante recibido. El saldo se agrega cuando admin lo apruebe."
+  });
+}));
+
+app.get("/api/wallet/topups", customerAuth, asyncHandler(async (req, res) => {
+  const rows = await query(
+    `SELECT id, method, amount, status, proof_note, admin_note, created_at, updated_at
+     FROM topup_requests
+     WHERE customer_id = :customerId
+     ORDER BY id DESC
+     LIMIT 50`,
+    { customerId: req.customer.id }
+  );
+  res.json(rows.map((row) => ({ ...row, amount: Number(row.amount) })));
+}));
+
+app.post("/api/customer/purchase", customerAuth, asyncHandler(async (req, res) => {
+  if (!req.customer.email_verified) return res.status(403).json({ error: "Verifica tu correo antes de comprar." });
+  const productId = Number(req.body.productId || 0);
+  const selectedOption = cleanLimited(req.body.selectedOption, "", 220);
+  const connection = await requirePool().getConnection();
+  let orderPayload = null;
+  let balanceAfterReward = 0;
+  try {
+    await connection.beginTransaction();
+    const [customerRows] = await connection.execute(
+      "SELECT * FROM customers WHERE id = :id AND active = 1 FOR UPDATE",
+      { id: req.customer.id }
+    );
+    if (!customerRows.length) {
+      const error = new Error("Cliente no encontrado.");
+      error.statusCode = 404;
+      throw error;
+    }
+    const customer = customerRows[0];
+    const [productRows] = await connection.execute(
+      "SELECT * FROM products WHERE id = :id AND active = 1 LIMIT 1",
+      { id: productId }
+    );
+    if (!productRows.length) {
+      const error = new Error("Producto no encontrado.");
+      error.statusCode = 404;
+      throw error;
+    }
+    const product = productRows[0];
+    const purchase = selectedProductPurchase(product, selectedOption);
+    if (purchase.price <= 0) {
+      const error = new Error("El producto no tiene un precio valido.");
+      error.statusCode = 400;
+      throw error;
+    }
+    const balance = await readCustomerBalance(customer.id, connection);
+    if (balance < purchase.price) {
+      const error = new Error(`Saldo insuficiente. Tienes ${balance.toFixed(2)} MX y necesitas ${purchase.price.toFixed(2)} MX.`);
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const receiptCode = randomToken("GS", 5);
+    const pinCode = randomToken("KEY", 6);
+    const selectedOptionText = purchase.label
+      ? `${purchase.label}${purchase.priceText ? ` - ${purchase.priceText}` : ""}`
+      : null;
+    const [orderResult] = await connection.execute(
+      `INSERT INTO customer_orders
+        (customer_id, product_id, product_name, selected_option, price, reward_amount, status, receipt_code, pin_code)
+       VALUES
+        (:customerId, :productId, :productName, :selectedOption, :price, :rewardAmount, 'paid', :receiptCode, :pinCode)`,
+      {
+        customerId: customer.id,
+        productId: product.id,
+        productName: product.name,
+        selectedOption: selectedOptionText,
+        price: purchase.price,
+        rewardAmount: PURCHASE_REWARD,
+        receiptCode,
+        pinCode
+      }
+    );
+    const orderId = orderResult.insertId;
+    await insertLedgerEntry(connection, {
+      customerId: customer.id,
+      type: "purchase",
+      amount: -purchase.price,
+      referenceType: "customer_orders",
+      referenceId: orderId,
+      description: `Compra ${product.name}`
+    });
+    balanceAfterReward = await insertLedgerEntry(connection, {
+      customerId: customer.id,
+      type: "reward",
+      amount: PURCHASE_REWARD,
+      referenceType: "customer_orders",
+      referenceId: orderId,
+      description: `Bono por compra ${product.name}`
+    });
+    await connection.execute(
+      `INSERT INTO sales (product_id, product_name, price, selected_option, status, source, session_id)
+       VALUES (:productId, :productName, :price, :selectedOption, 'pagado', 'saldo-web', :sessionId)`,
+      {
+        productId: product.id,
+        productName: product.name,
+        price: purchase.price,
+        selectedOption: selectedOptionText,
+        sessionId: cleanText(req.body.sessionId) || null
+      }
+    );
+    await connection.commit();
+    orderPayload = {
+      id: orderId,
+      productName: product.name,
+      selectedOption: selectedOptionText,
+      price: purchase.price,
+      rewardAmount: PURCHASE_REWARD,
+      receiptCode,
+      pinCode
+    };
+    notifyReceipt(customer, orderPayload, balanceAfterReward).catch((error) => {
+      console.error("No se pudo enviar comprobante de compra:");
+      console.error(error.stack || error);
+    });
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+
+  broadcast("reports-updated", {});
+  res.status(201).json({
+    order: orderPayload,
+    balance: balanceAfterReward,
+    support: supportLinks(orderPayload),
+    message: "Compra pagada con saldo. Te enviamos comprobante y PIN al correo."
   });
 }));
 
@@ -1218,9 +1904,278 @@ app.put("/api/admin/sales/:id/status", auth, adminOnly, asyncHandler(async (req,
   res.json({ ok: true });
 }));
 
+app.get("/api/admin/customers", auth, adminOnly, asyncHandler(async (_req, res) => {
+  if (!isDatabaseReady()) return res.json([]);
+  const rows = await query(
+    `SELECT
+       c.id, c.name, c.email, c.email_verified, c.active, c.last_ip, c.created_at,
+       COALESCE(SUM(w.amount), 0) AS balance,
+       COUNT(DISTINCT o.id) AS orders_count
+     FROM customers c
+     LEFT JOIN wallet_ledger w ON w.customer_id = c.id
+     LEFT JOIN customer_orders o ON o.customer_id = c.id
+     GROUP BY c.id, c.name, c.email, c.email_verified, c.active, c.last_ip, c.created_at
+     ORDER BY c.id DESC
+     LIMIT 300`
+  );
+  res.json(rows.map((row) => ({
+    ...row,
+    email_verified: Boolean(row.email_verified),
+    active: Boolean(row.active),
+    balance: Number(row.balance || 0),
+    orders_count: Number(row.orders_count || 0)
+  })));
+}));
+
+app.post("/api/admin/customers/:id/balance", auth, adminOnly, asyncHandler(async (req, res) => {
+  if (!isDatabaseReady()) return databaseWriteUnavailable(res);
+  const customerId = Number(req.params.id);
+  const amount = normalizeAmount(req.body.amount);
+  const note = cleanLimited(req.body.note, "Ajuste manual admin", 255) || "Ajuste manual admin";
+  if (!amount) return res.status(400).json({ error: "El monto no puede ser 0." });
+  const connection = await requirePool().getConnection();
+  let balance = 0;
+  let customer = null;
+  try {
+    await connection.beginTransaction();
+    const [customers] = await connection.execute(
+      "SELECT * FROM customers WHERE id = :id AND active = 1 FOR UPDATE",
+      { id: customerId }
+    );
+    if (!customers.length) {
+      const error = new Error("Cliente no encontrado.");
+      error.statusCode = 404;
+      throw error;
+    }
+    customer = customers[0];
+    balance = await insertLedgerEntry(connection, {
+      customerId,
+      type: "admin_adjustment",
+      amount,
+      referenceType: "admin_adjustment",
+      referenceId: req.user.id,
+      description: note,
+      adminId: req.user.id
+    });
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+
+  await sendStoreEmail(
+    customer.email,
+    `Saldo actualizado - ${BRAND_NAME}`,
+    [
+      `Hola ${customer.name},`,
+      "",
+      `Tu saldo fue actualizado por admin: ${amount > 0 ? "+" : ""}${amount.toFixed(2)} MX.`,
+      `Nuevo saldo: ${balance.toFixed(2)} MX.`,
+      `Nota: ${note}`
+    ].join("\n")
+  );
+  res.json({ ok: true, balance });
+}));
+
+app.get("/api/admin/topups", auth, adminOnly, asyncHandler(async (_req, res) => {
+  if (!isDatabaseReady()) return res.json([]);
+  const rows = await query(
+    `SELECT
+       t.*, c.name AS customer_name, c.email AS customer_email
+     FROM topup_requests t
+     JOIN customers c ON c.id = t.customer_id
+     ORDER BY FIELD(t.status, 'pending', 'approved', 'rejected'), t.id DESC
+     LIMIT 200`
+  );
+  res.json(rows.map((row) => ({ ...row, amount: Number(row.amount) })));
+}));
+
+app.post("/api/admin/topups/:id/approve", auth, adminOnly, asyncHandler(async (req, res) => {
+  if (!isDatabaseReady()) return databaseWriteUnavailable(res);
+  const topupId = Number(req.params.id);
+  const adminNote = cleanLimited(req.body.adminNote, "", 2000);
+  const connection = await requirePool().getConnection();
+  let topup = null;
+  let customer = null;
+  let balance = 0;
+  try {
+    await connection.beginTransaction();
+    const [topups] = await connection.execute(
+      "SELECT * FROM topup_requests WHERE id = :id FOR UPDATE",
+      { id: topupId }
+    );
+    if (!topups.length) {
+      const error = new Error("Recarga no encontrada.");
+      error.statusCode = 404;
+      throw error;
+    }
+    topup = topups[0];
+    if (topup.status !== "pending") {
+      const error = new Error("Esta recarga ya fue revisada.");
+      error.statusCode = 400;
+      throw error;
+    }
+    const [customers] = await connection.execute(
+      "SELECT * FROM customers WHERE id = :id AND active = 1 FOR UPDATE",
+      { id: topup.customer_id }
+    );
+    if (!customers.length) {
+      const error = new Error("Cliente no encontrado.");
+      error.statusCode = 404;
+      throw error;
+    }
+    customer = customers[0];
+    balance = await insertLedgerEntry(connection, {
+      customerId: customer.id,
+      type: "topup",
+      amount: Number(topup.amount),
+      referenceType: "topup_requests",
+      referenceId: topup.id,
+      description: `Recarga aprobada por ${topup.method}`,
+      adminId: req.user.id
+    });
+    await connection.execute(
+      `UPDATE topup_requests
+       SET status = 'approved', approved_by = :adminId, approved_at = NOW(), admin_note = :adminNote, updated_at = NOW()
+       WHERE id = :id`,
+      { adminId: req.user.id, adminNote: adminNote || null, id: topup.id }
+    );
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+
+  await sendStoreEmail(
+    customer.email,
+    `Recarga aprobada - ${BRAND_NAME}`,
+    [
+      `Hola ${customer.name},`,
+      "",
+      `Tu recarga #${topup.id} fue aprobada.`,
+      `Monto agregado: ${Number(topup.amount).toFixed(2)} MX.`,
+      `Saldo actual: ${balance.toFixed(2)} MX.`,
+      adminNote ? `Nota admin: ${adminNote}` : ""
+    ].filter(Boolean).join("\n")
+  );
+  broadcast("reports-updated", {});
+  res.json({ ok: true, balance });
+}));
+
+app.post("/api/admin/topups/:id/reject", auth, adminOnly, asyncHandler(async (req, res) => {
+  if (!isDatabaseReady()) return databaseWriteUnavailable(res);
+  const topupId = Number(req.params.id);
+  const adminNote = cleanLimited(req.body.adminNote, "Comprobante rechazado", 2000) || "Comprobante rechazado";
+  const connection = await requirePool().getConnection();
+  let topup = null;
+  let customer = null;
+  try {
+    await connection.beginTransaction();
+    const [topups] = await connection.execute(
+      "SELECT * FROM topup_requests WHERE id = :id FOR UPDATE",
+      { id: topupId }
+    );
+    if (!topups.length) {
+      const error = new Error("Recarga no encontrada.");
+      error.statusCode = 404;
+      throw error;
+    }
+    topup = topups[0];
+    if (topup.status !== "pending") {
+      const error = new Error("Esta recarga ya fue revisada.");
+      error.statusCode = 400;
+      throw error;
+    }
+    const [customers] = await connection.execute(
+      "SELECT * FROM customers WHERE id = :id AND active = 1 LIMIT 1",
+      { id: topup.customer_id }
+    );
+    customer = customers[0] || { name: "Cliente", email: ADMIN_RECEIPT_EMAIL };
+    await connection.execute(
+      "UPDATE topup_requests SET status = 'rejected', admin_note = :adminNote, updated_at = NOW() WHERE id = :id",
+      { adminNote, id: topupId }
+    );
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+  await sendStoreEmail(
+    customer.email,
+    `Recarga rechazada - ${BRAND_NAME}`,
+    [
+      `Hola ${customer.name},`,
+      "",
+      `Tu recarga #${topupId} fue rechazada.`,
+      `Motivo/nota: ${adminNote}`,
+      "Puedes subir un nuevo comprobante si el pago fue correcto."
+    ].join("\n")
+  );
+  res.json({ ok: true });
+}));
+
+app.get("/api/admin/orders", auth, adminOnly, asyncHandler(async (_req, res) => {
+  if (!isDatabaseReady()) return res.json([]);
+  const rows = await query(
+    `SELECT
+       o.*, c.name AS customer_name, c.email AS customer_email
+     FROM customer_orders o
+     JOIN customers c ON c.id = o.customer_id
+     ORDER BY o.id DESC
+     LIMIT 300`
+  );
+  res.json(rows.map((row) => ({
+    ...row,
+    price: Number(row.price),
+    reward_amount: Number(row.reward_amount)
+  })));
+}));
+
+app.get("/api/admin/backup", auth, adminOnly, asyncHandler(async (_req, res) => {
+  if (!isDatabaseReady()) return databaseWriteUnavailable(res);
+  const [
+    products,
+    sales,
+    customers,
+    ledger,
+    topups,
+    orders,
+    settings,
+    emailOutbox
+  ] = await Promise.all([
+    query("SELECT * FROM products ORDER BY id ASC"),
+    query("SELECT * FROM sales ORDER BY id ASC"),
+    query("SELECT id, name, email, email_verified, active, last_ip, created_at, updated_at FROM customers ORDER BY id ASC"),
+    query("SELECT * FROM wallet_ledger ORDER BY id ASC"),
+    query("SELECT id, customer_id, method, amount, status, proof_note, admin_note, approved_by, approved_at, created_at, updated_at FROM topup_requests ORDER BY id ASC"),
+    query("SELECT * FROM customer_orders ORDER BY id ASC"),
+    query("SELECT * FROM settings ORDER BY setting_key ASC"),
+    query("SELECT id, recipient_email, subject, status, error_text, sent_at, created_at FROM email_outbox ORDER BY id ASC")
+  ]);
+  res.setHeader("Content-Disposition", `attachment; filename="garcita-store-backup-${Date.now()}.json"`);
+  res.json({
+    exportedAt: new Date().toISOString(),
+    brand: BRAND_NAME,
+    products,
+    sales,
+    customers,
+    walletLedger: ledger,
+    topups,
+    orders,
+    settings,
+    emailOutbox
+  });
+}));
+
 app.get("/api/admin/reports", auth, adminOnly, asyncHandler(async (_req, res) => {
   if (!isDatabaseReady()) return res.json(offlineReportJson());
-  const [eventTotals, salesTotals, productTotals, dailyVisits] = await Promise.all([
+  const [eventTotals, salesTotals, productTotals, dailyVisits, walletTotals] = await Promise.all([
     query(
       `SELECT
         SUM(event_type = 'page_view') AS total_visits,
@@ -1243,6 +2198,13 @@ app.get("/api/admin/reports", auth, adminOnly, asyncHandler(async (_req, res) =>
        WHERE event_type = 'page_view' AND created_at >= DATE_SUB(CURDATE(), INTERVAL 13 DAY)
        GROUP BY DATE(created_at)
        ORDER BY day ASC`
+    ),
+    query(
+      `SELECT
+        COUNT(DISTINCT customer_id) AS customers_with_balance,
+        COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS balance_added,
+        COALESCE(SUM(CASE WHEN type = 'purchase' THEN -amount ELSE 0 END), 0) AS balance_spent
+       FROM wallet_ledger`
     )
   ]);
 
@@ -1257,6 +2219,9 @@ app.get("/api/admin/reports", auth, adminOnly, asyncHandler(async (_req, res) =>
     revenue: Number(salesTotals[0].revenue || 0),
     totalProducts: Number(productTotals[0].total_products || 0),
     activeProducts: Number(productTotals[0].active_products || 0),
+    customersWithBalance: Number(walletTotals[0].customers_with_balance || 0),
+    balanceAdded: Number(walletTotals[0].balance_added || 0),
+    balanceSpent: Number(walletTotals[0].balance_spent || 0),
     dailyVisits: dailyVisits.map((item) => ({ day: item.day, total: Number(item.total) }))
   });
 }));
@@ -1283,6 +2248,8 @@ app.use((error, _req, res, _next) => {
   res.status(statusCode).json({
     error: error instanceof DatabaseUnavailableError
       ? "Base de datos no disponible. La pagina sigue activa mientras se reintenta la conexion."
+      : statusCode < 500
+        ? (error.message || "No se pudo completar la solicitud.")
       : "Ocurrio un error en el servidor.",
     database: error instanceof DatabaseUnavailableError ? serializeDbState() : undefined,
     detail: IS_PRODUCTION ? undefined : (error.stack || String(error))

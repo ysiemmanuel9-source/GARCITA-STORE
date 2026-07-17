@@ -159,6 +159,11 @@
         th, td { padding: 13px 12px; border-bottom: 1px solid var(--border); text-align: left; font-size: .85rem; }
         th { color: var(--muted); font-weight: 600; }
         .status-select { background: #15151c; color: white; border: 1px solid var(--border); border-radius: 9px; padding: 7px 9px; }
+        .mini-input { width: 120px; border: 1px solid var(--border); border-radius: 9px; background: rgba(255,255,255,.04); color: white; padding: 8px 9px; }
+        .note-input { width: 190px; }
+        .actions-cell { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        .proof-thumb { width: 74px; height: 74px; object-fit: cover; border-radius: 10px; border: 1px solid var(--border); background: #09090d; }
+        .code-pill { display: inline-flex; padding: 5px 8px; border-radius: 9px; background: rgba(255,255,255,.06); border: 1px solid var(--border); font-size: .78rem; }
         .empty { text-align: center; color: var(--muted); padding: 38px 15px; }
         .toast {
             position: fixed; right: 22px; bottom: 22px; z-index: 100;
@@ -232,6 +237,10 @@
                 <button class="tab-btn active" data-tab="dashboard"><i class="fas fa-chart-line"></i> Resumen</button>
                 <button class="tab-btn" data-tab="products"><i class="fas fa-boxes-stacked"></i> Productos</button>
                 <button class="tab-btn" data-tab="sales"><i class="fas fa-receipt"></i> Ventas</button>
+                <button class="tab-btn" data-tab="customers"><i class="fas fa-users-gear"></i> Clientes y saldo</button>
+                <button class="tab-btn" data-tab="topups"><i class="fas fa-money-bill-transfer"></i> Recargas</button>
+                <button class="tab-btn" data-tab="orders"><i class="fas fa-key"></i> Ordenes</button>
+                <button class="tab-btn" data-tab="backup"><i class="fas fa-download"></i> Backup</button>
             </aside>
 
             <main class="content">
@@ -325,6 +334,56 @@
                         </table>
                     </article>
                 </section>
+
+                <section class="tab-section hidden" id="customersSection">
+                    <div class="page-head">
+                        <div><h2>Clientes y saldo</h2><p>Agrega o ajusta saldo real a clientes registrados.</p></div>
+                        <button class="secondary-btn" id="refreshCustomers"><i class="fas fa-rotate"></i> Actualizar</button>
+                    </div>
+                    <article class="panel table-wrap">
+                        <table>
+                            <thead><tr><th>ID</th><th>Cliente</th><th>Correo</th><th>Saldo</th><th>Compras</th><th>Ajuste manual</th></tr></thead>
+                            <tbody id="customersBody"></tbody>
+                        </table>
+                    </article>
+                </section>
+
+                <section class="tab-section hidden" id="topupsSection">
+                    <div class="page-head">
+                        <div><h2>Recargas</h2><p>Aprueba comprobantes para agregar saldo al cliente.</p></div>
+                        <button class="secondary-btn" id="refreshTopups"><i class="fas fa-rotate"></i> Actualizar</button>
+                    </div>
+                    <article class="panel table-wrap">
+                        <table>
+                            <thead><tr><th>ID</th><th>Cliente</th><th>Metodo</th><th>Monto</th><th>Comprobante</th><th>Estado</th><th>Acciones</th></tr></thead>
+                            <tbody id="topupsBody"></tbody>
+                        </table>
+                    </article>
+                </section>
+
+                <section class="tab-section hidden" id="ordersSection">
+                    <div class="page-head">
+                        <div><h2>Ordenes pagadas</h2><p>Compras hechas con saldo, comprobantes y PIN/KEY.</p></div>
+                        <button class="secondary-btn" id="refreshOrders"><i class="fas fa-rotate"></i> Actualizar</button>
+                    </div>
+                    <article class="panel table-wrap">
+                        <table>
+                            <thead><tr><th>ID</th><th>Cliente</th><th>Producto</th><th>Opcion</th><th>Total</th><th>Comprobante</th><th>PIN/KEY</th><th>Fecha</th></tr></thead>
+                            <tbody id="ordersBody"></tbody>
+                        </table>
+                    </article>
+                </section>
+
+                <section class="tab-section hidden" id="backupSection">
+                    <div class="page-head">
+                        <div><h2>Copia de seguridad</h2><p>Descarga productos, ventas, clientes, recargas, saldo y ordenes.</p></div>
+                    </div>
+                    <article class="panel">
+                        <div class="panel-title"><h3>Backup completo</h3><span class="muted">JSON seguro</span></div>
+                        <p class="muted" style="margin-bottom:18px;">Guarda una copia antes de cambios grandes o revisiones de saldo.</p>
+                        <button class="primary-btn" id="downloadBackup"><i class="fas fa-download"></i> Descargar backup</button>
+                    </article>
+                </section>
             </main>
         </div>
     </section>
@@ -333,7 +392,7 @@
 
     <script src="assets/security-guard.js"></script>
     <script>
-        const state = { authenticated: false, products: [], editingImage: "" };
+        const state = { authenticated: false, products: [], customers: [], topups: [], orders: [], editingImage: "" };
         const $ = (selector) => document.querySelector(selector);
         const money = (value) => `${Number(value || 0).toFixed(2)} MX`;
 
@@ -407,7 +466,7 @@
         }
 
         async function loadEverything() {
-            await Promise.all([loadReports(), loadProducts(), loadSales()]);
+            await Promise.all([loadReports(), loadProducts(), loadSales(), loadCustomers(), loadTopups(), loadOrders()]);
         }
 
         async function loadReports() {
@@ -545,6 +604,127 @@
             }
         }
 
+        async function loadCustomers() {
+            try {
+                state.customers = await api("/api/admin/customers");
+                $("#customersBody").innerHTML = state.customers.length ? state.customers.map((customer) => `
+                    <tr>
+                        <td>#${customer.id}</td>
+                        <td>${escapeHtml(customer.name)} ${customer.email_verified ? '<span class="status-pill">Verificado</span>' : '<span class="status-pill off">Sin verificar</span>'}</td>
+                        <td>${escapeHtml(customer.email)}</td>
+                        <td><strong>${money(customer.balance)}</strong></td>
+                        <td>${Number(customer.orders_count || 0)}</td>
+                        <td>
+                            <div class="actions-cell">
+                                <input class="mini-input balance-amount" data-id="${customer.id}" type="number" step="0.01" placeholder="+ saldo">
+                                <input class="mini-input note-input balance-note" data-id="${customer.id}" placeholder="Nota">
+                                <button class="primary-btn add-balance" data-id="${customer.id}" type="button"><i class="fas fa-plus"></i></button>
+                            </div>
+                        </td>
+                    </tr>
+                `).join("") : '<tr><td colspan="6" class="empty">Todavia no hay clientes registrados.</td></tr>';
+            } catch (error) {
+                showToast(error.message, true);
+            }
+        }
+
+        async function loadTopups() {
+            try {
+                state.topups = await api("/api/admin/topups");
+                $("#topupsBody").innerHTML = state.topups.length ? state.topups.map((topup) => `
+                    <tr>
+                        <td>#${topup.id}</td>
+                        <td>${escapeHtml(topup.customer_name)}<br><span class="muted">${escapeHtml(topup.customer_email)}</span></td>
+                        <td>${escapeHtml(topup.method)}</td>
+                        <td><strong>${money(topup.amount)}</strong></td>
+                        <td>
+                            ${topup.proof_image ? `<a href="${escapeHtml(topup.proof_image)}" target="_blank"><img class="proof-thumb" src="${escapeHtml(topup.proof_image)}" alt="Comprobante"></a>` : '<span class="muted">Sin imagen</span>'}
+                            ${topup.proof_note ? `<div class="muted">${escapeHtml(topup.proof_note)}</div>` : ""}
+                        </td>
+                        <td><span class="status-pill ${topup.status === "pending" ? "off" : ""}">${escapeHtml(topup.status)}</span></td>
+                        <td>
+                            ${topup.status === "pending" ? `
+                                <div class="actions-cell">
+                                    <input class="mini-input note-input topup-note" data-id="${topup.id}" placeholder="Nota admin">
+                                    <button class="primary-btn approve-topup" data-id="${topup.id}" type="button"><i class="fas fa-check"></i></button>
+                                    <button class="danger-btn reject-topup" data-id="${topup.id}" type="button"><i class="fas fa-xmark"></i></button>
+                                </div>
+                            ` : `<span class="muted">${escapeHtml(topup.admin_note || "Revisado")}</span>`}
+                        </td>
+                    </tr>
+                `).join("") : '<tr><td colspan="7" class="empty">No hay recargas todavia.</td></tr>';
+            } catch (error) {
+                showToast(error.message, true);
+            }
+        }
+
+        async function loadOrders() {
+            try {
+                state.orders = await api("/api/admin/orders");
+                $("#ordersBody").innerHTML = state.orders.length ? state.orders.map((order) => `
+                    <tr>
+                        <td>#${order.id}</td>
+                        <td>${escapeHtml(order.customer_name)}<br><span class="muted">${escapeHtml(order.customer_email)}</span></td>
+                        <td>${escapeHtml(order.product_name)}</td>
+                        <td>${escapeHtml(order.selected_option || "Sin opcion")}</td>
+                        <td>${money(order.price)}</td>
+                        <td><span class="code-pill">${escapeHtml(order.receipt_code)}</span></td>
+                        <td><span class="code-pill">${escapeHtml(order.pin_code)}</span></td>
+                        <td>${new Date(order.created_at).toLocaleString("es")}</td>
+                    </tr>
+                `).join("") : '<tr><td colspan="8" class="empty">Todavia no hay compras pagadas con saldo.</td></tr>';
+            } catch (error) {
+                showToast(error.message, true);
+            }
+        }
+
+        async function addCustomerBalance(id) {
+            const amount = document.querySelector(`.balance-amount[data-id="${id}"]`)?.value;
+            const note = document.querySelector(`.balance-note[data-id="${id}"]`)?.value;
+            try {
+                await api(`/api/admin/customers/${id}/balance`, {
+                    method: "POST",
+                    body: JSON.stringify({ amount, note })
+                });
+                showToast("Saldo actualizado.");
+                await loadCustomers();
+            } catch (error) {
+                showToast(error.message, true);
+            }
+        }
+
+        async function reviewTopup(id, action) {
+            const adminNote = document.querySelector(`.topup-note[data-id="${id}"]`)?.value || "";
+            try {
+                await api(`/api/admin/topups/${id}/${action}`, {
+                    method: "POST",
+                    body: JSON.stringify({ adminNote })
+                });
+                showToast(action === "approve" ? "Recarga aprobada y saldo agregado." : "Recarga rechazada.");
+                await Promise.all([loadTopups(), loadCustomers(), loadReports()]);
+            } catch (error) {
+                showToast(error.message, true);
+            }
+        }
+
+        async function downloadBackup() {
+            try {
+                const backup = await api("/api/admin/backup");
+                const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = `garcita-store-backup-${Date.now()}.json`;
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                URL.revokeObjectURL(url);
+                showToast("Backup descargado.");
+            } catch (error) {
+                showToast(error.message, true);
+            }
+        }
+
         function switchTab(tab) {
             document.querySelectorAll(".tab-btn").forEach((button) => button.classList.toggle("active", button.dataset.tab === tab));
             document.querySelectorAll(".tab-section").forEach((section) => section.classList.add("hidden"));
@@ -552,6 +732,9 @@
             if (tab === "products") loadProducts();
             if (tab === "sales") loadSales();
             if (tab === "dashboard") loadReports();
+            if (tab === "customers") loadCustomers();
+            if (tab === "topups") loadTopups();
+            if (tab === "orders") loadOrders();
         }
 
         $("#loginForm").addEventListener("submit", async (event) => {
@@ -641,10 +824,26 @@
             }
         });
 
+        $("#customersBody").addEventListener("click", (event) => {
+            const button = event.target.closest(".add-balance");
+            if (button) addCustomerBalance(button.dataset.id);
+        });
+
+        $("#topupsBody").addEventListener("click", (event) => {
+            const approve = event.target.closest(".approve-topup");
+            const reject = event.target.closest(".reject-topup");
+            if (approve) reviewTopup(approve.dataset.id, "approve");
+            if (reject) reviewTopup(reject.dataset.id, "reject");
+        });
+
         document.querySelectorAll(".tab-btn").forEach((button) => button.addEventListener("click", () => switchTab(button.dataset.tab)));
         $("#cancelEditBtn").addEventListener("click", resetProductForm);
         $("#refreshReports").addEventListener("click", loadReports);
         $("#refreshSales").addEventListener("click", loadSales);
+        $("#refreshCustomers").addEventListener("click", loadCustomers);
+        $("#refreshTopups").addEventListener("click", loadTopups);
+        $("#refreshOrders").addEventListener("click", loadOrders);
+        $("#downloadBackup").addEventListener("click", downloadBackup);
         $("#logoutBtn").addEventListener("click", logout);
 
         const events = new EventSource("/api/events");
