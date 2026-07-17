@@ -3,6 +3,7 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const dns = require("dns");
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -21,6 +22,13 @@ const {
   summarizeDbCandidate,
   getSafeEnvDiagnostics
 } = require("./scripts/db-config");
+
+try {
+  dns.setDefaultResultOrder("ipv4first");
+} catch (error) {
+  console.warn("[email] No se pudo forzar preferencia DNS IPv4:");
+  console.warn(error.stack || error);
+}
 
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
@@ -52,12 +60,15 @@ const ADMIN_WARNING_MESSAGE = "Si no eres admin, no pongas mas la contrasena.";
 const ADMIN_BLOCK_MESSAGE = "Bloqueado por querer acceder al panel de admin sin permiso ni contrasena.";
 let emailTransporterCache = null;
 let emailTransporterCacheKey = "";
+let emailWorkingConfig = null;
 const emailState = {
   configured: false,
   verified: false,
   source: null,
+  activeSource: null,
   lastVerifyAt: null,
-  lastError: null
+  lastError: null,
+  lastAttemptedConfigs: []
 };
 
 const DEFAULT_PRODUCTS = [
@@ -1081,6 +1092,8 @@ function smtpConfig() {
     host,
     port,
     secure,
+    requireTLS: !secure && port === 587,
+    family: 4,
     auth: user ? { user, pass } : undefined,
     from: cleanText(process.env.SMTP_FROM, user || ADMIN_EMAIL),
     source
@@ -1089,6 +1102,89 @@ function smtpConfig() {
 
 function maskEmail(value) {
   return cleanEmail(value).replace(/^(.{2}).*(@.*)$/, "$1***$2");
+}
+
+function safeSmtpConfig(config) {
+  if (!config) return null;
+  return {
+    source: config.source,
+    host: config.host,
+    port: config.port,
+    secure: Boolean(config.secure),
+    requireTLS: Boolean(config.requireTLS),
+    family: config.family || 4,
+    authUser: config.auth?.user || null,
+    from: config.from
+  };
+}
+
+function smtpConfigKey(config) {
+  return JSON.stringify({
+    host: config.host,
+    port: config.port,
+    secure: Boolean(config.secure),
+    requireTLS: Boolean(config.requireTLS),
+    family: config.family || 4,
+    user: config.auth?.user || "",
+    from: config.from
+  });
+}
+
+function isSameSmtpConfig(left, right) {
+  return Boolean(left && right) && smtpConfigKey(left) === smtpConfigKey(right);
+}
+
+function isGmailSmtpConfig(config) {
+  return /(^|\.)gmail\.com$/i.test(cleanEmail(config.auth?.user || "").split("@")[1] || "")
+    || /smtp\.gmail\.com$/i.test(config.host || "");
+}
+
+function gmailStartTlsConfig(config) {
+  if (!config?.auth?.user || !config?.auth?.pass || !isGmailSmtpConfig(config)) return null;
+  return {
+    ...config,
+    host: "smtp.gmail.com",
+    port: 587,
+    secure: false,
+    requireTLS: true,
+    family: 4,
+    source: `${config.source} STARTTLS fallback`
+  };
+}
+
+function smtpAttemptConfigs(baseConfig, preferWorking = false) {
+  const attempts = [];
+  const pushUnique = (config) => {
+    if (!config) return;
+    if (!attempts.some((item) => isSameSmtpConfig(item, config))) attempts.push(config);
+  };
+  if (preferWorking) pushUnique(emailWorkingConfig);
+  pushUnique(baseConfig);
+  pushUnique(gmailStartTlsConfig(baseConfig));
+  return attempts;
+}
+
+function smtpErrorDetails(error, config = null) {
+  const details = {
+    code: error?.code || null,
+    errno: error?.errno || null,
+    syscall: error?.syscall || null,
+    address: error?.address || null,
+    port: error?.port || null,
+    hostname: error?.hostname || null,
+    command: error?.command || null,
+    responseCode: error?.responseCode || null,
+    response: error?.response || null,
+    message: error?.message || String(error),
+    stack: sanitizeEmailError(error, config)
+  };
+  details.family = typeof details.address === "string" && details.address.includes(":") ? "IPv6" : (details.address ? "IPv4" : (config?.family || 4));
+  return details;
+}
+
+function shouldTryStartTlsFallback(error) {
+  const text = `${error?.code || ""} ${error?.message || ""} ${error?.stack || ""}`;
+  return /ENETUNREACH|ETIMEDOUT|ESOCKET|ECONNECTION|Connection timeout|timeout/i.test(text);
 }
 
 function sanitizeEmailError(error, config = null) {
@@ -1110,8 +1206,10 @@ function safeEmailConfigStatus() {
       configured: false,
       verified: false,
       source: null,
+      activeSource: null,
       lastVerifyAt: emailState.lastVerifyAt,
       lastError: emailState.lastError,
+      lastAttemptedConfigs: emailState.lastAttemptedConfigs,
       message: "SMTP/Gmail no configurado. Los correos se guardan en email_outbox pero no salen a Gmail."
     };
   }
@@ -1119,36 +1217,69 @@ function safeEmailConfigStatus() {
     configured: true,
     verified: emailState.verified,
     source: config.source,
+    activeSource: emailState.activeSource,
     host: config.host,
     port: config.port,
     secure: config.secure,
+    requireTLS: Boolean(config.requireTLS),
+    family: config.family || 4,
     user: config.auth?.user ? maskEmail(config.auth.user) : null,
     from: config.from,
     lastVerifyAt: emailState.lastVerifyAt,
-    lastError: emailState.lastError
+    lastError: emailState.lastError,
+    lastAttemptedConfigs: emailState.lastAttemptedConfigs
   };
 }
 
 function getEmailTransporter(config) {
-  const cacheKey = JSON.stringify({
-    host: config.host,
-    port: config.port,
-    secure: config.secure,
-    user: config.auth?.user || "",
-    from: config.from
-  });
+  const cacheKey = smtpConfigKey(config);
   if (emailTransporterCache && emailTransporterCacheKey === cacheKey) return emailTransporterCache;
   emailTransporterCacheKey = cacheKey;
   emailTransporterCache = nodemailer.createTransport({
     host: config.host,
     port: config.port,
     secure: config.secure,
+    requireTLS: Boolean(config.requireTLS),
+    family: config.family || 4,
     auth: config.auth,
+    tls: {
+      servername: config.host,
+      minVersion: "TLSv1.2"
+    },
     connectionTimeout: 12000,
     greetingTimeout: 12000,
-    socketTimeout: 18000
+    socketTimeout: 18000,
+    dnsTimeout: 8000
   });
   return emailTransporterCache;
+}
+
+async function sendSmtpDiagnosticEmail(config) {
+  const to = cleanEmail(ADMIN_EMAIL);
+  if (!to || !to.includes("@")) return null;
+  try {
+    console.log("[email] verify() fallo; intentando correo de prueba con la misma configuracion:");
+    console.log(JSON.stringify(safeSmtpConfig(config), null, 2));
+    const transporter = getEmailTransporter(config);
+    await transporter.sendMail({
+      from: `"${BRAND_NAME}" <${config.from}>`,
+      to,
+      subject: `Prueba SMTP ${BRAND_NAME}`,
+      text: "Correo de prueba automatico despues de fallo en verify().",
+      html: emailLayout({
+        title: "Prueba SMTP",
+        subtitle: "Este correo se envio porque verify() fallo y el sistema intento diagnosticar el envio.",
+        bodyHtml: emailParagraphs("Correo de prueba automatico despues de fallo en verify().")
+      })
+    });
+    console.log("[email] Correo de prueba enviado correctamente.");
+    return { sent: true };
+  } catch (testError) {
+    const details = smtpErrorDetails(testError, config);
+    console.error("[email] Error completo enviando correo de prueba:");
+    console.error(JSON.stringify(details, null, 2));
+    return { sent: false, error: details };
+  }
 }
 
 async function verifyEmailTransporterInBackground() {
@@ -1156,25 +1287,50 @@ async function verifyEmailTransporterInBackground() {
   emailState.configured = Boolean(config);
   emailState.verified = false;
   emailState.source = config?.source || null;
+  emailState.activeSource = null;
   emailState.lastVerifyAt = new Date().toISOString();
   emailState.lastError = null;
+  emailState.lastAttemptedConfigs = [];
+  emailWorkingConfig = null;
   if (!config) {
     console.warn("[email] SMTP/Gmail no configurado. Se usara email_outbox como respaldo.");
     return;
   }
-  try {
-    const transporter = getEmailTransporter(config);
-    await transporter.verify();
-    emailState.verified = true;
-    emailState.lastError = null;
-    console.log(`[email] SMTP verificado correctamente usando ${config.source}.`);
-  } catch (error) {
-    const safeError = sanitizeEmailError(error, config);
-    emailState.verified = false;
-    emailState.lastError = safeError;
-    console.error(`[email] No se pudo verificar SMTP usando ${config.source}.`);
-    console.error(safeError);
+
+  const attempts = smtpAttemptConfigs(config, false);
+  let lastError = null;
+  for (let index = 0; index < attempts.length; index += 1) {
+    const attemptConfig = attempts[index];
+    emailState.lastAttemptedConfigs.push(safeSmtpConfig(attemptConfig));
+    console.log("[email] Verificando SMTP con configuracion:");
+    console.log(JSON.stringify(safeSmtpConfig(attemptConfig), null, 2));
+    try {
+      const transporter = getEmailTransporter(attemptConfig);
+      await transporter.verify();
+      emailState.verified = true;
+      emailState.activeSource = attemptConfig.source;
+      emailState.lastError = null;
+      emailWorkingConfig = attemptConfig;
+      console.log(`[email] SMTP verificado correctamente usando ${attemptConfig.source}.`);
+      return;
+    } catch (error) {
+      lastError = error;
+      const details = smtpErrorDetails(error, attemptConfig);
+      console.error(`[email] No se pudo verificar SMTP usando ${attemptConfig.source}.`);
+      console.error(JSON.stringify(details, null, 2));
+      await sendSmtpDiagnosticEmail(attemptConfig);
+      const hasNext = index < attempts.length - 1;
+      if (hasNext && shouldTryStartTlsFallback(error)) {
+        console.warn("[email] Fallo compatible con red/IPv6/timeout. Probando fallback STARTTLS por 587.");
+        continue;
+      }
+      break;
+    }
   }
+
+  const safeError = lastError ? smtpErrorDetails(lastError, attempts[attempts.length - 1] || config) : null;
+  emailState.verified = false;
+  emailState.lastError = safeError ? JSON.stringify(safeError) : "SMTP no verificado.";
 }
 
 function emailParagraphs(text) {
@@ -1389,30 +1545,54 @@ async function sendStoreEmail(input, subject, body) {
     };
   }
 
-  try {
-    const transporter = getEmailTransporter(config);
-    await transporter.sendMail({
-      from: `"${BRAND_NAME}" <${config.from}>`,
-      to: email,
-      subject: cleanSubject,
-      text,
-      html,
-      attachments
-    });
-    await rememberEmail(email, cleanSubject, text, "sent");
-    return { sent: true, queued: false, provider: config.source };
-  } catch (error) {
-    const safeError = sanitizeEmailError(error, config);
-    console.error(`[email] Error enviando correo a ${email}:`);
-    console.error(safeError);
-    await rememberEmail(email, cleanSubject, text, "failed", safeError);
-    return {
-      sent: false,
-      queued: true,
-      provider: config.source,
-      reason: error.message || String(error)
-    };
+  const attempts = smtpAttemptConfigs(config, Boolean(emailWorkingConfig));
+  let lastError = null;
+  let lastConfig = config;
+  for (let index = 0; index < attempts.length; index += 1) {
+    const attemptConfig = attempts[index];
+    lastConfig = attemptConfig;
+    try {
+      console.log("[email] Enviando correo con configuracion SMTP:");
+      console.log(JSON.stringify(safeSmtpConfig(attemptConfig), null, 2));
+      const transporter = getEmailTransporter(attemptConfig);
+      await transporter.sendMail({
+        from: `"${BRAND_NAME}" <${attemptConfig.from}>`,
+        to: email,
+        subject: cleanSubject,
+        text,
+        html,
+        attachments
+      });
+      emailWorkingConfig = attemptConfig;
+      emailState.verified = true;
+      emailState.activeSource = attemptConfig.source;
+      emailState.lastError = null;
+      await rememberEmail(email, cleanSubject, text, "sent");
+      return { sent: true, queued: false, provider: attemptConfig.source };
+    } catch (error) {
+      lastError = error;
+      const details = smtpErrorDetails(error, attemptConfig);
+      console.error(`[email] Error completo enviando correo a ${email}:`);
+      console.error(JSON.stringify(details, null, 2));
+      const hasNext = index < attempts.length - 1;
+      if (hasNext && shouldTryStartTlsFallback(error)) {
+        console.warn("[email] Envio fallo por red/IPv6/timeout. Probando siguiente configuracion SMTP.");
+        continue;
+      }
+      break;
+    }
   }
+
+  const finalError = smtpErrorDetails(lastError, lastConfig);
+  const finalErrorText = JSON.stringify(finalError);
+  await rememberEmail(email, cleanSubject, text, "failed", finalErrorText);
+  emailState.lastError = finalErrorText;
+  return {
+    sent: false,
+    queued: true,
+    provider: lastConfig.source,
+    reason: finalError.message || "Correo no enviado."
+  };
 }
 
 function resendSecondsRemaining(record) {
