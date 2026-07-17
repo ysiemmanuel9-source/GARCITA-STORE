@@ -38,15 +38,14 @@ Si tu servicio MySQL se llama distinto, cambia `MySQL` por el nombre real del se
 Para que lleguen correos reales de verificacion, comprobantes y PIN/KEY, agrega las variables SMTP de tu correo o proveedor:
 
 ```env
-SMTP_HOST=tu_servidor_smtp
-SMTP_PORT=587
-SMTP_SECURE=false
-SMTP_USER=tu_correo
-SMTP_PASSWORD=tu_clave_smtp
-SMTP_FROM=tu_correo
+GMAIL_USER=tu_correo@gmail.com
+GMAIL_APP_PASSWORD=tu_clave_de_app_de_16_caracteres
+SMTP_FROM=tu_correo@gmail.com
 ```
 
-Si no configuras SMTP, las compras y recargas no se rompen: el sistema guarda los correos en la tabla `email_outbox`, pero no puede enviarlos automaticamente.
+IMPORTANTE: `GMAIL_APP_PASSWORD` debe ser una clave de app de Google, no tu contrasena normal. Si no configuras Gmail/SMTP, las compras y recargas no se rompen: el sistema guarda los correos en la tabla `email_outbox`, pero no puede enviarlos automaticamente.
+
+Tambien puedes usar otro proveedor con `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` y `SMTP_FROM`.
 
 Despues de agregar o corregir variables, haz `Deploy` o `Redeploy` del servicio web. Railway aplica las variables a la siguiente ejecucion del servicio.
 

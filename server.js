@@ -46,6 +46,8 @@ const ADMIN_FAILED_LOGIN_LIMIT = 3;
 const ADMIN_BLOCK_MS = 24 * 60 * 60 * 1000;
 const ADMIN_WARNING_MESSAGE = "Si no eres admin, no pongas mas la contrasena.";
 const ADMIN_BLOCK_MESSAGE = "Bloqueado por querer acceder al panel de admin sin permiso ni contrasena.";
+let emailTransporterCache = null;
+let emailTransporterCacheKey = "";
 
 const DEFAULT_PRODUCTS = [
   {
@@ -921,18 +923,82 @@ function randomToken(prefix, bytes = 5) {
 }
 
 function smtpConfig() {
-  const host = cleanText(process.env.SMTP_HOST);
+  const gmailUser = cleanText(process.env.GMAIL_USER || process.env.SMTP_GMAIL_USER);
+  const gmailPass = String(process.env.GMAIL_APP_PASSWORD || process.env.SMTP_GMAIL_APP_PASSWORD || "");
+  const explicitUser = cleanText(process.env.SMTP_USER || process.env.EMAIL_USER);
+  const explicitPass = String(process.env.SMTP_PASSWORD || process.env.EMAIL_PASSWORD || "");
+  let host = cleanText(process.env.SMTP_HOST);
+  let port = Number(process.env.SMTP_PORT || 587);
+  let secure = String(process.env.SMTP_SECURE || "").toLowerCase() === "true" || port === 465;
+  let user = explicitUser || gmailUser;
+  let pass = explicitPass || gmailPass;
+  let source = "SMTP";
+
+  if (!host && gmailUser && gmailPass) {
+    host = "smtp.gmail.com";
+    port = 465;
+    secure = true;
+    user = gmailUser;
+    pass = gmailPass;
+    source = "Gmail App Password";
+  } else if (!host && user && pass && /@gmail\.com$/i.test(user)) {
+    host = "smtp.gmail.com";
+    port = 465;
+    secure = true;
+    source = "Gmail SMTP";
+  }
+
   if (!host) return null;
-  const port = Number(process.env.SMTP_PORT || 587);
-  const user = cleanText(process.env.SMTP_USER);
-  const pass = String(process.env.SMTP_PASSWORD || "");
   return {
     host,
     port,
-    secure: String(process.env.SMTP_SECURE || "").toLowerCase() === "true" || port === 465,
+    secure,
     auth: user ? { user, pass } : undefined,
-    from: cleanText(process.env.SMTP_FROM, user || ADMIN_RECEIPT_EMAIL)
+    from: cleanText(process.env.SMTP_FROM, user || ADMIN_RECEIPT_EMAIL),
+    source
   };
+}
+
+function safeEmailConfigStatus() {
+  const config = smtpConfig();
+  if (!config) {
+    return {
+      configured: false,
+      source: null,
+      message: "SMTP/Gmail no configurado. Los correos se guardan en email_outbox pero no salen a Gmail."
+    };
+  }
+  return {
+    configured: true,
+    source: config.source,
+    host: config.host,
+    port: config.port,
+    secure: config.secure,
+    user: config.auth?.user ? config.auth.user.replace(/^(.{2}).*(@.*)$/, "$1***$2") : null,
+    from: config.from
+  };
+}
+
+function getEmailTransporter(config) {
+  const cacheKey = JSON.stringify({
+    host: config.host,
+    port: config.port,
+    secure: config.secure,
+    user: config.auth?.user || "",
+    from: config.from
+  });
+  if (emailTransporterCache && emailTransporterCacheKey === cacheKey) return emailTransporterCache;
+  emailTransporterCacheKey = cacheKey;
+  emailTransporterCache = nodemailer.createTransport({
+    host: config.host,
+    port: config.port,
+    secure: config.secure,
+    auth: config.auth,
+    connectionTimeout: 12000,
+    greetingTimeout: 12000,
+    socketTimeout: 18000
+  });
+  return emailTransporterCache;
 }
 
 async function rememberEmail(recipientEmail, subject, body, status, errorText = null) {
@@ -958,29 +1024,39 @@ async function sendStoreEmail(recipientEmail, subject, body) {
   if (!config) {
     console.warn(`[email] SMTP no configurado. Guardando correo pendiente para ${email}: ${cleanSubject}`);
     await rememberEmail(email, cleanSubject, body, "pending", "SMTP no configurado");
-    return { sent: false, queued: true, reason: "SMTP no configurado" };
+    return {
+      sent: false,
+      queued: true,
+      reason: "SMTP/Gmail no configurado. Agrega GMAIL_USER y GMAIL_APP_PASSWORD o SMTP_HOST/SMTP_USER/SMTP_PASSWORD."
+    };
   }
 
   try {
-    const transporter = nodemailer.createTransport({
-      host: config.host,
-      port: config.port,
-      secure: config.secure,
-      auth: config.auth
-    });
+    const transporter = getEmailTransporter(config);
     await transporter.sendMail({
       from: `"${BRAND_NAME}" <${config.from}>`,
       to: email,
       subject: cleanSubject,
-      text: body
+      text: body,
+      html: body
+        .split("\n")
+        .map((line) => line.includes("codigo de verificacion")
+          ? `<p style="font-size:18px;font-weight:700;color:#ff2538">${escapeHtml(line)}</p>`
+          : `<p>${escapeHtml(line) || "&nbsp;"}</p>`)
+        .join("")
     });
     await rememberEmail(email, cleanSubject, body, "sent");
-    return { sent: true, queued: false };
+    return { sent: true, queued: false, provider: config.source };
   } catch (error) {
     console.error(`[email] Error enviando correo a ${email}:`);
     console.error(error.stack || error);
     await rememberEmail(email, cleanSubject, body, "failed", error.stack || String(error));
-    return { sent: false, queued: true, reason: error.message || String(error) };
+    return {
+      sent: false,
+      queued: true,
+      provider: config.source,
+      reason: error.message || String(error)
+    };
   }
 }
 
@@ -2230,6 +2306,7 @@ app.get("/health", (_req, res) => {
   res.status(200).json({
     ok: true,
     service: BRAND_NAME,
+    email: safeEmailConfigStatus(),
     database: serializeDbState(),
     mysqlEnvPresent: mysqlEnvPresence(),
     mysqlConfigSources: mysqlConfigSources(),

@@ -10,7 +10,8 @@
     products: [],
     paymentMethods: [],
     pendingPurchase: null,
-    pendingEmail: ""
+    pendingEmail: "",
+    emailNotice: ""
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -169,6 +170,21 @@
       }
       .wallet-btn.danger { background: rgba(255,37,56,.13); border: 1px solid rgba(255,37,56,.36); }
       .wallet-muted { color: var(--text-muted); font-size: .9rem; }
+      .wallet-alert {
+        margin: 0 0 12px;
+        border: 1px solid rgba(255,71,87,.34);
+        border-radius: 13px;
+        padding: 12px 13px;
+        background: rgba(255,37,56,.08);
+        color: #ffd4d8;
+        font-size: .9rem;
+        line-height: 1.45;
+      }
+      .wallet-alert.ok {
+        border-color: rgba(34,197,94,.34);
+        background: rgba(34,197,94,.08);
+        color: #d7ffe4;
+      }
       .wallet-balance { font: 900 2.2rem Outfit, sans-serif; color: #fff; margin: 2px 0 0; }
       .wallet-methods { display: grid; gap: 10px; }
       .wallet-method {
@@ -303,6 +319,7 @@
           <button type="button" class="wallet-tab ${mode === "register" ? "active" : ""}" data-action="auth-tab" data-mode="register">Crear cuenta</button>
           <button type="button" class="wallet-tab ${mode === "verify" ? "active" : ""}" data-action="auth-tab" data-mode="verify">Verificar</button>
         </div>
+        ${state.emailNotice ? `<div class="wallet-alert ${state.emailNotice.startsWith("Codigo enviado") ? "ok" : ""}">${escapeHtml(state.emailNotice)}</div>` : ""}
         ${mode === "register" ? `
           <form data-form="register" class="wallet-grid">
             <div class="wallet-field"><label>Nombre</label><input name="name" required></div>
@@ -328,6 +345,13 @@
           </form>` : ""}
       </div>
       <p class="wallet-muted">Tu saldo se protege desde el servidor. No depende de la IP ni del navegador.</p>`;
+  }
+
+  function emailDeliveryNotice(result, email) {
+    if (result?.debugCode) return `Modo local: el codigo para ${email} es ${result.debugCode}.`;
+    if (result?.emailDelivery?.sent) return `Codigo enviado a ${email}. Revisa Recibidos, Promociones o Spam en Gmail.`;
+    const reason = result?.emailDelivery?.reason || "falta configurar Gmail/SMTP en el servidor";
+    return `No se pudo enviar el codigo a Gmail todavia: ${reason}.`;
   }
 
   async function openAccountModal(mode = "login") {
@@ -579,7 +603,8 @@
           password: data.password
         });
         state.pendingEmail = data.email;
-        showToast(result.message || "Codigo enviado.");
+        state.emailNotice = emailDeliveryNotice(result, data.email);
+        showToast(state.emailNotice);
         modal("Verificar correo", accountBody("verify"));
       }
       if (form.dataset.form === "verify") {
@@ -588,6 +613,7 @@
           code: data.code
         });
         state.customer = result.customer;
+        state.emailNotice = "";
         updateWalletChip();
         showToast("Correo verificado. Tu saldo ya esta activo.");
         if (state.pendingPurchase) openPurchasePanel(document.querySelector(`[data-product-id="${state.pendingPurchase.productId}"]`));
@@ -638,8 +664,11 @@
     }
     if (action === "resend-code") {
       const email = $("#walletModalRoot input[name='email']")?.value || state.pendingEmail;
-      await postJson("/api/customer/resend-code", { email });
-      showToast("Codigo reenviado.");
+      const result = await postJson("/api/customer/resend-code", { email });
+      state.pendingEmail = email;
+      state.emailNotice = emailDeliveryNotice(result, email);
+      showToast(state.emailNotice);
+      modal("Verificar correo", accountBody("verify"));
     }
   }
 
