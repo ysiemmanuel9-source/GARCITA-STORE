@@ -12,7 +12,9 @@
     pendingPurchase: null,
     pendingEmail: "",
     emailNotice: "",
-    resendAvailableAt: 0
+    resendAvailableAt: 0,
+    verificationSent: false,
+    verifyLoading: false
   };
   let resendTimer = null;
 
@@ -365,7 +367,8 @@
           <button type="button" class="wallet-tab ${mode === "register" ? "active" : ""}" data-action="auth-tab" data-mode="register">Crear cuenta</button>
           <button type="button" class="wallet-tab ${mode === "verify" ? "active" : ""}" data-action="auth-tab" data-mode="verify">Verificar</button>
         </div>
-        ${state.emailNotice ? `<div class="wallet-alert ${state.emailNotice.startsWith("Codigo enviado") ? "ok" : ""}">${escapeHtml(state.emailNotice)}</div>` : ""}
+        ${state.verifyLoading ? '<div class="wallet-alert ok"><i class="fas fa-spinner fa-spin"></i> Enviando codigo...</div>' : ""}
+        ${state.emailNotice ? `<div class="wallet-alert ${state.emailNotice.includes("correctamente") || state.emailNotice.startsWith("Codigo enviado") ? "ok" : ""}">${escapeHtml(state.emailNotice)}</div>` : ""}
         ${mode === "register" ? `
           <form data-form="register" class="wallet-grid">
             <div class="wallet-field"><label>Nombre</label><input name="name" required></div>
@@ -377,11 +380,16 @@
         ${mode === "verify" ? `
           <form data-form="verify" class="wallet-grid">
             <div class="wallet-field"><label>Correo</label><input name="email" type="email" value="${escapeHtml(state.pendingEmail)}" required></div>
-            <div class="wallet-field"><label>Codigo</label><input name="code" inputmode="numeric" maxlength="12" required></div>
+            ${state.verificationSent ? '<div class="wallet-field"><label>Codigo</label><input name="code" inputmode="numeric" maxlength="12" required autofocus></div>' : ""}
             <div class="wallet-actions" style="grid-column:1/-1">
-              <button class="wallet-btn" type="submit"><i class="fas fa-shield-check"></i> Verificar correo</button>
-              <button class="wallet-btn ghost" type="button" data-action="resend-code" ${resendRemaining ? "disabled" : ""}>${resendRemaining ? `Reenviar en ${resendRemaining}s` : "Reenviar codigo"}</button>
-              <span class="wallet-countdown" data-resend-countdown>${resendRemaining ? `Puedes reenviar en ${resendRemaining}s.` : "Puedes reenviar el codigo."}</span>
+              <button class="wallet-btn" type="submit" ${state.verifyLoading ? "disabled" : ""}>
+                <i class="fas ${state.verifyLoading ? "fa-spinner fa-spin" : state.verificationSent ? "fa-shield-check" : "fa-paper-plane"}"></i>
+                ${state.verifyLoading ? "Enviando codigo..." : state.verificationSent ? "Verificar codigo" : "Enviar codigo"}
+              </button>
+              ${state.verificationSent ? `
+                <button class="wallet-btn ghost" type="button" data-action="resend-code" ${resendRemaining || state.verifyLoading ? "disabled" : ""}>${resendRemaining ? `Reenviar en ${resendRemaining}s` : "Reenviar codigo"}</button>
+                <span class="wallet-countdown" data-resend-countdown>${resendRemaining ? `Puedes reenviar en ${resendRemaining}s.` : "Puedes reenviar el codigo."}</span>
+              ` : ""}
             </div>
           </form>` : ""}
         ${mode === "login" ? `
@@ -395,8 +403,8 @@
   }
 
   function emailDeliveryNotice(result, email) {
-    if (result?.emailDelivery?.sent) return `Codigo enviado a ${email}. Revisa Recibidos, Promociones o Spam en Gmail.`;
-    const reason = result?.emailDelivery?.reason || "el servidor no pudo confirmar SMTP";
+    if (result?.emailDelivery?.sent) return `Codigo enviado correctamente a ${email}.`;
+    const reason = result?.emailDelivery?.reason || "el servidor no pudo confirmar el envio";
     return `Correo no enviado: ${reason}.`;
   }
 
@@ -661,22 +669,43 @@
           password: data.password
         });
         state.pendingEmail = data.email;
+        state.verificationSent = Boolean(result?.emailDelivery?.sent);
+        state.verifyLoading = false;
         state.emailNotice = emailDeliveryNotice(result, data.email);
         setResendCooldown(result);
         showToast(state.emailNotice);
         modal("Verificar correo", accountBody("verify"));
       }
       if (form.dataset.form === "verify") {
+        state.pendingEmail = data.email;
+        if (!state.verificationSent) {
+          state.verifyLoading = true;
+          state.emailNotice = "";
+          modal("Verificar correo", accountBody("verify"));
+          const result = await postJson("/api/customer/resend-code", { email: data.email });
+          state.verifyLoading = false;
+          state.verificationSent = Boolean(result?.emailDelivery?.sent);
+          state.emailNotice = emailDeliveryNotice(result, data.email);
+          setResendCooldown(result);
+          showToast(state.emailNotice);
+          modal("Verificar correo", accountBody("verify"));
+          return;
+        }
         const result = await postJson("/api/customer/verify-email", {
           email: data.email,
           code: data.code
         });
         state.customer = result.customer;
         state.emailNotice = "";
+        state.verificationSent = false;
+        state.verifyLoading = false;
         updateWalletChip();
-        showToast("Correo verificado. Tu saldo ya esta activo.");
-        if (state.pendingPurchase) openPurchasePanel(document.querySelector(`[data-product-id="${state.pendingPurchase.productId}"]`));
-        else openAccountModal();
+        showToast("Correo verificado correctamente.");
+        closeModal();
+        if (state.pendingPurchase) {
+          const productCard = document.querySelector(`[data-product-id="${state.pendingPurchase.productId}"]`);
+          if (productCard) setTimeout(() => openPurchasePanel(productCard), 450);
+        }
       }
       if (form.dataset.form === "login") {
         const result = await postJson("/api/customer/login", {
@@ -711,7 +740,9 @@
       }
     } catch (error) {
       if (error.data?.retryAfter) setResendCooldown(error.data);
+      state.verifyLoading = false;
       showToast(error.message);
+      if (form.dataset.form === "verify") modal("Verificar correo", accountBody("verify"));
     } finally {
       if (submitButton) submitButton.disabled = false;
     }
@@ -720,7 +751,12 @@
   async function handleModalClick(event) {
     const action = event.target.closest("[data-action]")?.dataset.action;
     if (!action) return;
-    if (action === "auth-tab") modal("Cuenta y saldo", accountBody(event.target.closest("[data-action]").dataset.mode));
+    if (action === "auth-tab") {
+      const mode = event.target.closest("[data-action]").dataset.mode;
+      state.verifyLoading = false;
+      if (mode === "verify" && !state.pendingEmail) state.verificationSent = false;
+      modal(mode === "verify" ? "Verificar correo" : "Cuenta y saldo", accountBody(mode));
+    }
     if (action === "open-topup") openTopupModal();
     if (action === "remitly") openRemitly();
     if (action === "pay-balance") payWithBalance();
@@ -739,12 +775,15 @@
         const email = $("#walletModalRoot input[name='email']")?.value || state.pendingEmail;
         const result = await postJson("/api/customer/resend-code", { email });
         state.pendingEmail = email;
+        state.verificationSent = Boolean(result?.emailDelivery?.sent);
+        state.verifyLoading = false;
         state.emailNotice = emailDeliveryNotice(result, email);
         setResendCooldown(result);
         showToast(state.emailNotice);
         modal("Verificar correo", accountBody("verify"));
       } catch (error) {
         if (error.data?.retryAfter) setResendCooldown(error.data);
+        state.verifyLoading = false;
         showToast(error.message);
         modal("Verificar correo", accountBody("verify"));
       } finally {

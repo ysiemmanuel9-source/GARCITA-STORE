@@ -18,6 +18,8 @@ JWT_SECRET=pon_un_texto_largo_y_secreto
 ADMIN_USERNAME=Garcita9
 ADMIN_PASSWORD=GarcitaStore
 ADMIN_EMAIL=mg4563690@gmail.com
+RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxxxxxxx
+EMAIL_FROM=onboarding@resend.dev
 ```
 
 IMPORTANTE: que los dos cuadros esten conectados en el canvas no siempre mete las variables dentro del servicio web. En Railway, el servicio web debe tener variables de referencia al servicio MySQL.
@@ -35,22 +37,17 @@ MYSQLDATABASE=${{MySQL.MYSQLDATABASE}}
 
 Si tu servicio MySQL se llama distinto, cambia `MySQL` por el nombre real del servicio.
 
-Para que lleguen correos reales de verificacion, comprobantes y PIN/KEY, agrega las variables SMTP de tu correo o proveedor:
+Para que lleguen correos reales de verificacion, comprobantes, aprobaciones y rechazos, configura Resend y agrega estas variables al servicio web:
 
 ```env
-GMAIL_USER=tu_correo@gmail.com
-GMAIL_APP_PASSWORD=tu_clave_de_app_de_16_caracteres
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=465
-SMTP_SECURE=true
-SMTP_USER=tu_correo@gmail.com
-SMTP_PASSWORD=tu_clave_de_app_de_16_caracteres
-SMTP_FROM=tu_correo@gmail.com
+RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxxxxxxx
+EMAIL_FROM=onboarding@resend.dev
+ADMIN_EMAIL=mg4563690@gmail.com
 ```
 
-IMPORTANTE: `GMAIL_APP_PASSWORD` debe ser una clave de app de Google, no tu contrasena normal. Si no configuras Gmail/SMTP, las compras y recargas no se rompen: el sistema guarda los correos en la tabla `email_outbox`, pero no puede enviarlos automaticamente.
+`onboarding@resend.dev` sirve para pruebas iniciales. Cuando tengas tu dominio verificado en Resend, cambia solo `EMAIL_FROM` por el correo de tu dominio, por ejemplo `Garcita Store <ventas@tudominio.com>` o `ventas@tudominio.com`.
 
-Tambien puedes usar otro proveedor con `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASSWORD` y `SMTP_FROM`.
+Si no configuras Resend, las compras y recargas no se rompen: el sistema guarda los correos en la tabla `email_outbox`, pero no puede enviarlos automaticamente.
 
 Despues de agregar o corregir variables, haz `Deploy` o `Redeploy` del servicio web. Railway aplica las variables a la siguiente ejecucion del servicio.
 
