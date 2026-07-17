@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const dns = require("dns");
+const net = require("net");
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -61,6 +62,7 @@ const ADMIN_BLOCK_MESSAGE = "Bloqueado por querer acceder al panel de admin sin 
 let emailTransporterCache = null;
 let emailTransporterCacheKey = "";
 let emailWorkingConfig = null;
+const smtpIpv4Cache = new Map();
 const emailState = {
   configured: false,
   verified: false,
@@ -1108,7 +1110,9 @@ function safeSmtpConfig(config) {
   if (!config) return null;
   return {
     source: config.source,
-    host: config.host,
+    host: config.originalHost || config.servername || config.host,
+    connectHost: config.host,
+    resolvedAddresses: config.resolvedAddresses || undefined,
     port: config.port,
     secure: Boolean(config.secure),
     requireTLS: Boolean(config.requireTLS),
@@ -1121,6 +1125,7 @@ function safeSmtpConfig(config) {
 function smtpConfigKey(config) {
   return JSON.stringify({
     host: config.host,
+    servername: config.servername || "",
     port: config.port,
     secure: Boolean(config.secure),
     requireTLS: Boolean(config.requireTLS),
@@ -1149,6 +1154,50 @@ function gmailStartTlsConfig(config) {
     requireTLS: true,
     family: 4,
     source: `${config.source} STARTTLS fallback`
+  };
+}
+
+async function resolveSmtpConfigForRailway(config) {
+  if (!config) return null;
+  const originalHost = config.originalHost || config.servername || config.host;
+  if ((config.family || 4) !== 4 || net.isIP(config.host)) {
+    return {
+      ...config,
+      originalHost,
+      servername: config.servername || (net.isIP(config.host) ? originalHost : config.host),
+      family: config.family || 4
+    };
+  }
+
+  const cached = smtpIpv4Cache.get(config.host);
+  let addresses = cached?.expires > Date.now() ? cached.addresses : null;
+  if (!addresses) {
+    try {
+      addresses = await dns.promises.resolve4(config.host);
+    } catch (resolveError) {
+      console.warn(`[email] dns.resolve4 fallo para ${config.host}; intentando dns.lookup family=4.`);
+      console.warn(sanitizeEmailError(resolveError, config));
+      const lookupAddresses = await dns.promises.lookup(config.host, { family: 4, all: true });
+      addresses = lookupAddresses.map((item) => item.address);
+    }
+    if (!addresses?.length) {
+      const error = new Error(`No se encontraron direcciones IPv4 para ${config.host}.`);
+      error.code = "ENODATA";
+      throw error;
+    }
+    smtpIpv4Cache.set(config.host, {
+      addresses,
+      expires: Date.now() + 5 * 60 * 1000
+    });
+  }
+
+  return {
+    ...config,
+    originalHost,
+    host: addresses[0],
+    servername: originalHost,
+    family: 4,
+    resolvedAddresses: addresses
   };
 }
 
@@ -1241,9 +1290,10 @@ function getEmailTransporter(config) {
     secure: config.secure,
     requireTLS: Boolean(config.requireTLS),
     family: config.family || 4,
+    servername: config.servername || config.originalHost || config.host,
     auth: config.auth,
     tls: {
-      servername: config.host,
+      servername: config.servername || config.originalHost || config.host,
       minVersion: "TLSv1.2"
     },
     connectionTimeout: 12000,
@@ -1258,11 +1308,12 @@ async function sendSmtpDiagnosticEmail(config) {
   const to = cleanEmail(ADMIN_EMAIL);
   if (!to || !to.includes("@")) return null;
   try {
+    const resolvedConfig = await resolveSmtpConfigForRailway(config);
     console.log("[email] verify() fallo; intentando correo de prueba con la misma configuracion:");
-    console.log(JSON.stringify(safeSmtpConfig(config), null, 2));
-    const transporter = getEmailTransporter(config);
+    console.log(JSON.stringify(safeSmtpConfig(resolvedConfig), null, 2));
+    const transporter = getEmailTransporter(resolvedConfig);
     await transporter.sendMail({
-      from: `"${BRAND_NAME}" <${config.from}>`,
+      from: `"${BRAND_NAME}" <${resolvedConfig.from}>`,
       to,
       subject: `Prueba SMTP ${BRAND_NAME}`,
       text: "Correo de prueba automatico despues de fallo en verify().",
@@ -1299,12 +1350,15 @@ async function verifyEmailTransporterInBackground() {
 
   const attempts = smtpAttemptConfigs(config, false);
   let lastError = null;
+  let lastAttemptConfig = config;
   for (let index = 0; index < attempts.length; index += 1) {
-    const attemptConfig = attempts[index];
-    emailState.lastAttemptedConfigs.push(safeSmtpConfig(attemptConfig));
-    console.log("[email] Verificando SMTP con configuracion:");
-    console.log(JSON.stringify(safeSmtpConfig(attemptConfig), null, 2));
+    const rawAttemptConfig = attempts[index];
     try {
+      const attemptConfig = await resolveSmtpConfigForRailway(rawAttemptConfig);
+      lastAttemptConfig = attemptConfig;
+      emailState.lastAttemptedConfigs.push(safeSmtpConfig(attemptConfig));
+      console.log("[email] Verificando SMTP con configuracion:");
+      console.log(JSON.stringify(safeSmtpConfig(attemptConfig), null, 2));
       const transporter = getEmailTransporter(attemptConfig);
       await transporter.verify();
       emailState.verified = true;
@@ -1315,10 +1369,10 @@ async function verifyEmailTransporterInBackground() {
       return;
     } catch (error) {
       lastError = error;
-      const details = smtpErrorDetails(error, attemptConfig);
-      console.error(`[email] No se pudo verificar SMTP usando ${attemptConfig.source}.`);
+      const details = smtpErrorDetails(error, lastAttemptConfig);
+      console.error(`[email] No se pudo verificar SMTP usando ${lastAttemptConfig.source}.`);
       console.error(JSON.stringify(details, null, 2));
-      await sendSmtpDiagnosticEmail(attemptConfig);
+      await sendSmtpDiagnosticEmail(lastAttemptConfig);
       const hasNext = index < attempts.length - 1;
       if (hasNext && shouldTryStartTlsFallback(error)) {
         console.warn("[email] Fallo compatible con red/IPv6/timeout. Probando fallback STARTTLS por 587.");
@@ -1328,7 +1382,7 @@ async function verifyEmailTransporterInBackground() {
     }
   }
 
-  const safeError = lastError ? smtpErrorDetails(lastError, attempts[attempts.length - 1] || config) : null;
+  const safeError = lastError ? smtpErrorDetails(lastError, lastAttemptConfig) : null;
   emailState.verified = false;
   emailState.lastError = safeError ? JSON.stringify(safeError) : "SMTP no verificado.";
 }
@@ -1549,9 +1603,10 @@ async function sendStoreEmail(input, subject, body) {
   let lastError = null;
   let lastConfig = config;
   for (let index = 0; index < attempts.length; index += 1) {
-    const attemptConfig = attempts[index];
-    lastConfig = attemptConfig;
+    const rawAttemptConfig = attempts[index];
     try {
+      const attemptConfig = await resolveSmtpConfigForRailway(rawAttemptConfig);
+      lastConfig = attemptConfig;
       console.log("[email] Enviando correo con configuracion SMTP:");
       console.log(JSON.stringify(safeSmtpConfig(attemptConfig), null, 2));
       const transporter = getEmailTransporter(attemptConfig);
@@ -1571,7 +1626,7 @@ async function sendStoreEmail(input, subject, body) {
       return { sent: true, queued: false, provider: attemptConfig.source };
     } catch (error) {
       lastError = error;
-      const details = smtpErrorDetails(error, attemptConfig);
+      const details = smtpErrorDetails(error, lastConfig);
       console.error(`[email] Error completo enviando correo a ${email}:`);
       console.error(JSON.stringify(details, null, 2));
       const hasNext = index < attempts.length - 1;
