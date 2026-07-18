@@ -18,6 +18,7 @@ JWT_SECRET=pon_un_texto_largo_y_secreto
 ADMIN_USERNAME=Garcita9
 ADMIN_PASSWORD=GarcitaStore
 ADMIN_EMAIL=mg4563690@gmail.com
+EMAIL_PROVIDER=auto
 RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxxxxxxx
 EMAIL_FROM=onboarding@resend.dev
 ```
@@ -37,9 +38,12 @@ MYSQLDATABASE=${{MySQL.MYSQLDATABASE}}
 
 Si tu servicio MySQL se llama distinto, cambia `MySQL` por el nombre real del servicio.
 
-Para que lleguen correos reales de verificacion, comprobantes, aprobaciones y rechazos, configura Resend y agrega estas variables al servicio web:
+Para que lleguen correos reales de verificacion, comprobantes, aprobaciones y rechazos, usa una de estas dos opciones.
+
+Opcion A: Resend por API HTTPS:
 
 ```env
+EMAIL_PROVIDER=resend
 RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxxxxxxx
 EMAIL_FROM=onboarding@resend.dev
 ADMIN_EMAIL=mg4563690@gmail.com
@@ -47,7 +51,21 @@ ADMIN_EMAIL=mg4563690@gmail.com
 
 `onboarding@resend.dev` sirve para pruebas iniciales. Cuando tengas tu dominio verificado en Resend, cambia solo `EMAIL_FROM` por el correo de tu dominio, por ejemplo `Garcita Store <ventas@tudominio.com>` o `ventas@tudominio.com`.
 
-Si no configuras Resend, las compras y recargas no se rompen: el sistema guarda los correos en la tabla `email_outbox`, pero no puede enviarlos automaticamente.
+Opcion B: Gmail API por HTTPS, sin Resend:
+
+```env
+EMAIL_PROVIDER=gmail-api
+GMAIL_API_USER=tu_correo@gmail.com
+GMAIL_API_CLIENT_ID=tu_client_id_de_google
+GMAIL_API_CLIENT_SECRET=tu_client_secret_de_google
+GMAIL_API_REFRESH_TOKEN=tu_refresh_token_de_google
+GMAIL_API_FROM=GARCITA STORE <tu_correo@gmail.com>
+ADMIN_EMAIL=mg4563690@gmail.com
+```
+
+No uses contrasena de aplicacion de Gmail en Railway para este proyecto. Esa forma depende de puertos de correo que Railway solo habilita en Pro y aun asi Gmail puede bloquear por seguridad. Gmail API usa HTTPS y evita ese problema.
+
+Si no configuras ningun proveedor, las compras y recargas no se rompen: el sistema guarda los correos en la tabla `email_outbox`, pero no puede enviarlos automaticamente.
 
 Despues de agregar o corregir variables, haz `Deploy` o `Redeploy` del servicio web. Railway aplica las variables a la siguiente ejecucion del servicio.
 

@@ -16,8 +16,8 @@ Proyecto listo para Railway con Express, MySQL, panel administrativo, productos 
    `MYSQLDATABASE=${{MySQL.MYSQLDATABASE}}`.
 5. Define:
    `NODE_ENV=production`, `JWT_SECRET`, `ADMIN_USERNAME=Garcita9`, `ADMIN_PASSWORD=GarcitaStore`.
-6. Para que los codigos de verificacion, comprobantes y aprobaciones lleguen por correo, agrega tambien:
-   `ADMIN_EMAIL=mg4563690@gmail.com`, `RESEND_API_KEY` y `EMAIL_FROM=onboarding@resend.dev`.
+6. Para que los codigos de verificacion, comprobantes y aprobaciones lleguen por correo, usa una de estas dos opciones:
+   `RESEND_API_KEY` + `EMAIL_FROM=onboarding@resend.dev`, o Gmail API con `GMAIL_API_CLIENT_ID`, `GMAIL_API_CLIENT_SECRET`, `GMAIL_API_REFRESH_TOKEN` y `GMAIL_API_USER`.
 
 El comando `npm start` levanta Express inmediatamente para que `/health` responda 200 en Railway. Despues intenta conectar MySQL en segundo plano, crea/actualiza tablas y sincroniza el admin inicial cuando las variables MySQL ya esten disponibles.
 
@@ -25,7 +25,7 @@ El panel admin solo permite entrar cuando MySQL esta conectado de verdad, para q
 
 Las recargas por transferencia, OXXO y Binance se guardan como pendientes hasta que admin revise el comprobante y las apruebe. Esa es la forma segura porque esos metodos no avisan automaticamente a la pagina sin una API/webhook externo. Remitly abre WhatsApp directo para trato manual.
 
-El correo usa Resend en produccion. Puedes probar primero con `EMAIL_FROM=onboarding@resend.dev`; cuando verifiques tu dominio en Resend, cambia `EMAIL_FROM` por tu correo propio.
+El correo no usa conexiones de correo tradicionales. Usa APIs HTTPS: Resend o Gmail API. Si configuras Gmail API, el sistema puede enviar desde tu cuenta de Gmail sin depender de puertos bloqueados en Railway.
 
 El comando `npm run verify` revisa estructura, scripts, assets, `railway.json`, variables MySQL simuladas de Railway y el arranque sin base de datos.
 

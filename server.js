@@ -11,6 +11,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const mysql = require("mysql2/promise");
 const { Resend } = require("resend");
+const { google } = require("googleapis");
 const {
   getDbConfigCandidates,
   getDbSearchOrder,
@@ -52,9 +53,10 @@ const ADMIN_BLOCK_MS = 24 * 60 * 60 * 1000;
 const ADMIN_WARNING_MESSAGE = "Si no eres admin, no pongas mas la contrasena.";
 const ADMIN_BLOCK_MESSAGE = "Bloqueado por querer acceder al panel de admin sin permiso ni contrasena.";
 let resendClient = null;
+let gmailApiClient = null;
 const emailState = {
   configured: false,
-  provider: "Resend",
+  provider: "auto",
   lastCheckAt: null,
   lastError: null,
   lastEmailId: null
@@ -1065,19 +1067,80 @@ function formatResendFrom(value) {
   return `${BRAND_NAME} <${from}>`;
 }
 
-function safeResendConfigStatus() {
-  const config = resendConfig();
+function gmailApiConfig() {
+  const clientId = cleanText(process.env.GMAIL_API_CLIENT_ID || process.env.GOOGLE_CLIENT_ID);
+  const clientSecret = cleanText(process.env.GMAIL_API_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET);
+  const refreshToken = cleanText(process.env.GMAIL_API_REFRESH_TOKEN || process.env.GOOGLE_REFRESH_TOKEN);
+  const user = cleanEmail(process.env.GMAIL_API_USER || process.env.GMAIL_USER || ADMIN_EMAIL);
+  const rawFrom = cleanText(process.env.GMAIL_API_FROM || process.env.EMAIL_FROM);
+  const from = rawFrom && !/onboarding@resend\.dev/i.test(rawFrom)
+    ? rawFrom
+    : `${BRAND_NAME} <${user || ADMIN_EMAIL}>`;
   return {
-    configured: config.configured,
-    provider: config.provider,
-    from: formatResendFrom(config.from),
+    configured: Boolean(clientId && clientSecret && refreshToken && user),
+    clientId,
+    clientSecret,
+    refreshToken,
+    user,
+    from,
+    provider: "Gmail API"
+  };
+}
+
+function formatGmailApiFrom(value, user) {
+  const from = cleanText(value, `${BRAND_NAME} <${user}>`);
+  if (from.includes("<") && from.includes(">")) return from;
+  return `${BRAND_NAME} <${from}>`;
+}
+
+function emailProviderConfig() {
+  const requested = cleanText(process.env.EMAIL_PROVIDER || "auto").toLowerCase();
+  const resend = resendConfig();
+  const gmailApi = gmailApiConfig();
+  if (["gmail", "gmail-api", "gmail_api"].includes(requested)) {
+    return gmailApi.configured
+      ? { ...gmailApi, key: "gmail-api" }
+      : { ...gmailApi, key: "gmail-api", configured: false, reason: "Faltan GMAIL_API_CLIENT_ID, GMAIL_API_CLIENT_SECRET, GMAIL_API_REFRESH_TOKEN y GMAIL_API_USER." };
+  }
+  if (requested === "resend") {
+    return resend.configured
+      ? { ...resend, key: "resend" }
+      : { ...resend, key: "resend", configured: false, reason: "Falta RESEND_API_KEY." };
+  }
+  if (gmailApi.configured) return { ...gmailApi, key: "gmail-api" };
+  if (resend.configured) return { ...resend, key: "resend" };
+  return {
+    configured: false,
+    key: "none",
+    provider: "Sin proveedor",
+    reason: "Configura Resend o Gmail API. Gmail con contrasena de aplicacion no se usa porque depende de puertos de correo bloqueados en planes bajos de Railway."
+  };
+}
+
+function safeEmailProviderStatus() {
+  const active = emailProviderConfig();
+  const resend = resendConfig();
+  const gmailApi = gmailApiConfig();
+  return {
+    configured: active.configured,
+    provider: active.provider,
+    activeProvider: active.key,
+    from: active.key === "gmail-api"
+      ? formatGmailApiFrom(active.from, active.user)
+      : active.key === "resend"
+        ? formatResendFrom(active.from)
+        : null,
     adminEmail: ADMIN_EMAIL,
+    availableProviders: {
+      resend: resend.configured,
+      gmailApi: gmailApi.configured
+    },
     lastCheckAt: emailState.lastCheckAt,
     lastError: emailState.lastError,
     lastEmailId: emailState.lastEmailId,
-    message: config.configured
-      ? "Resend configurado."
-      : "Resend no configurado. Agrega RESEND_API_KEY, EMAIL_FROM y ADMIN_EMAIL en Railway."
+    message: active.configured
+      ? `${active.provider} configurado.`
+      : active.reason
   };
 }
 
@@ -1088,29 +1151,156 @@ function getResendClient() {
   return resendClient;
 }
 
-function sanitizeResendError(error) {
+function getGmailApiClient() {
+  const config = gmailApiConfig();
+  if (!config.configured) return null;
+  if (!gmailApiClient) {
+    const oauth2Client = new google.auth.OAuth2(config.clientId, config.clientSecret);
+    oauth2Client.setCredentials({ refresh_token: config.refreshToken });
+    gmailApiClient = google.gmail({ version: "v1", auth: oauth2Client });
+  }
+  return gmailApiClient;
+}
+
+function sanitizeEmailProviderError(error) {
   let text = error?.stack || error?.message || String(error);
-  const secretValues = [process.env.RESEND_API_KEY].filter(Boolean);
+  const secretValues = [
+    process.env.RESEND_API_KEY,
+    process.env.GMAIL_API_CLIENT_SECRET,
+    process.env.GOOGLE_CLIENT_SECRET,
+    process.env.GMAIL_API_REFRESH_TOKEN,
+    process.env.GOOGLE_REFRESH_TOKEN
+  ].filter(Boolean);
   for (const secret of secretValues) text = text.split(String(secret)).join("[oculto]");
   return text.slice(0, 2500);
 }
 
 async function verifyEmailProviderInBackground() {
-  const config = resendConfig();
+  const config = emailProviderConfig();
   emailState.configured = config.configured;
+  emailState.provider = config.provider;
   emailState.lastCheckAt = new Date().toISOString();
   emailState.lastError = null;
   if (!config.configured) {
-    console.warn("[email] Resend no configurado. Se guardaran correos en email_outbox como respaldo.");
+    console.warn(`[email] ${config.reason} Se guardaran correos en email_outbox como respaldo.`);
     return;
   }
-  console.log("[email] Resend configurado para envio.");
+  console.log(`[email] ${config.provider} configurado para envio.`);
+  const from = config.key === "gmail-api"
+    ? formatGmailApiFrom(config.from, config.user)
+    : formatResendFrom(config.from);
   console.log(JSON.stringify({
-    provider: "Resend",
-    from: formatResendFrom(config.from),
+    provider: config.provider,
+    from,
     adminEmail: ADMIN_EMAIL,
-    apiKey: "present"
+    resendApiKey: process.env.RESEND_API_KEY ? "present" : "missing",
+    gmailApiClientId: process.env.GMAIL_API_CLIENT_ID || process.env.GOOGLE_CLIENT_ID ? "present" : "missing",
+    gmailApiRefreshToken: process.env.GMAIL_API_REFRESH_TOKEN || process.env.GOOGLE_REFRESH_TOKEN ? "present" : "missing"
   }, null, 2));
+}
+
+function encodeEmailHeader(value) {
+  const clean = String(value || "").replace(/[\r\n]+/g, " ").trim();
+  if (/^[\x20-\x7e]*$/.test(clean)) return clean;
+  return `=?UTF-8?B?${Buffer.from(clean, "utf8").toString("base64")}?=`;
+}
+
+function quotedHeaderValue(value) {
+  return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\r\n]+/g, " ");
+}
+
+function base64Lines(buffer) {
+  return Buffer.from(buffer).toString("base64").replace(/.{1,76}/g, "$&\r\n").trim();
+}
+
+function base64Url(value) {
+  return Buffer.from(value, "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function buildGmailRawMessage({ from, to, subject, text, html, attachments = [] }) {
+  const date = new Date().toUTCString();
+  const mixedBoundary = `mixed_${crypto.randomBytes(12).toString("hex")}`;
+  const altBoundary = `alt_${crypto.randomBytes(12).toString("hex")}`;
+  const hasAttachments = attachments.length > 0;
+  const headers = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${encodeEmailHeader(subject)}`,
+    `Date: ${date}`,
+    "MIME-Version: 1.0",
+    hasAttachments
+      ? `Content-Type: multipart/mixed; boundary="${mixedBoundary}"`
+      : `Content-Type: multipart/alternative; boundary="${altBoundary}"`
+  ];
+  const alternativePart = [
+    `--${altBoundary}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    base64Lines(Buffer.from(text || "", "utf8")),
+    `--${altBoundary}`,
+    'Content-Type: text/html; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    base64Lines(Buffer.from(html || "", "utf8")),
+    `--${altBoundary}--`
+  ].join("\r\n");
+  const body = hasAttachments
+    ? [
+        `--${mixedBoundary}`,
+        `Content-Type: multipart/alternative; boundary="${altBoundary}"`,
+        "",
+        alternativePart,
+        ...attachments.map((item) => {
+          const filename = safeFilename(item.filename, "comprobante");
+          const contentType = cleanText(item.contentType || item.content_type, "application/octet-stream");
+          const content = Buffer.isBuffer(item.content) ? item.content : Buffer.from(String(item.content || ""), "base64");
+          return [
+            `--${mixedBoundary}`,
+            `Content-Type: ${contentType}; name="${quotedHeaderValue(filename)}"`,
+            `Content-Disposition: attachment; filename="${quotedHeaderValue(filename)}"`,
+            "Content-Transfer-Encoding: base64",
+            "",
+            base64Lines(content)
+          ].join("\r\n");
+        }),
+        `--${mixedBoundary}--`
+      ].join("\r\n")
+    : alternativePart;
+  return base64Url(`${headers.join("\r\n")}\r\n\r\n${body}`);
+}
+
+async function sendWithGmailApi(config, email, cleanSubject, text, html, attachments) {
+  const gmail = getGmailApiClient();
+  if (!gmail) {
+    throw new Error("Gmail API no esta configurado.");
+  }
+  const from = formatGmailApiFrom(config.from, config.user);
+  const raw = buildGmailRawMessage({
+    from,
+    to: email,
+    subject: cleanSubject,
+    text,
+    html,
+    attachments
+  });
+  console.log("[email] Enviando correo con Gmail API:");
+  console.log(JSON.stringify({
+    provider: "Gmail API",
+    from,
+    to: email,
+    subject: cleanSubject,
+    attachments: attachments.length
+  }, null, 2));
+  const response = await gmail.users.messages.send({
+    userId: "me",
+    requestBody: { raw }
+  });
+  return { id: response.data?.id || null };
 }
 
 function emailParagraphs(text) {
@@ -1313,62 +1503,71 @@ async function sendStoreEmail(input, subject, body) {
     footer: "Garcita Ventas"
   });
   const attachments = Array.isArray(options.attachments) ? options.attachments : [];
-  const config = resendConfig();
-  const resend = getResendClient();
-  if (!resend) {
-    console.warn(`[email] Resend no configurado. Guardando correo pendiente para ${email}: ${cleanSubject}`);
-    await rememberEmail(email, cleanSubject, text, "pending", "Resend no configurado");
+  const config = emailProviderConfig();
+  if (!config.configured) {
+    console.warn(`[email] ${config.reason} Guardando correo pendiente para ${email}: ${cleanSubject}`);
+    await rememberEmail(email, cleanSubject, text, "pending", config.reason || "Correo no configurado");
     return {
       sent: false,
       queued: true,
-      reason: "Correo no enviado. Resend no esta configurado en el servidor.",
-      provider: "Resend"
+      reason: "Correo no enviado. Falta configurar el proveedor de correo en el servidor.",
+      provider: config.provider
     };
   }
 
   try {
-    console.log("[email] Enviando correo con Resend:");
-    console.log(JSON.stringify({
-      provider: "Resend",
-      from: formatResendFrom(config.from),
-      to: email,
-      subject: cleanSubject,
-      attachments: attachments.length
-    }, null, 2));
-    const { data, error } = await resend.emails.send({
-      from: formatResendFrom(config.from),
-      to: [email],
-      subject: cleanSubject,
-      text,
-      html,
-      attachments: attachments.map((item) => ({
-        filename: safeFilename(item.filename, "comprobante"),
-        content: item.content
-      }))
-    });
-    if (error) {
-      const resendError = new Error(error.message || "Resend rechazo el envio.");
-      resendError.details = error;
-      throw resendError;
+    let result = null;
+    if (config.key === "gmail-api") {
+      result = await sendWithGmailApi(config, email, cleanSubject, text, html, attachments);
+    } else {
+      const resend = getResendClient();
+      if (!resend) throw new Error("Resend no esta configurado.");
+      console.log("[email] Enviando correo con Resend:");
+      console.log(JSON.stringify({
+        provider: "Resend",
+        from: formatResendFrom(config.from),
+        to: email,
+        subject: cleanSubject,
+        attachments: attachments.length
+      }, null, 2));
+      const { data, error } = await resend.emails.send({
+        from: formatResendFrom(config.from),
+        to: [email],
+        subject: cleanSubject,
+        text,
+        html,
+        attachments: attachments.map((item) => ({
+          filename: safeFilename(item.filename, "comprobante"),
+          content: item.content
+        }))
+      });
+      if (error) {
+        const resendError = new Error(error.message || "Resend rechazo el envio.");
+        resendError.details = error;
+        throw resendError;
+      }
+      result = { id: data?.id || null };
     }
     emailState.lastError = null;
     emailState.lastCheckAt = new Date().toISOString();
     emailState.configured = true;
-    emailState.lastEmailId = data?.id || null;
+    emailState.provider = config.provider;
+    emailState.lastEmailId = result?.id || null;
     await rememberEmail(email, cleanSubject, text, "sent");
-    return { sent: true, queued: false, provider: "Resend", id: data?.id || null };
+    return { sent: true, queued: false, provider: config.provider, id: result?.id || null };
   } catch (error) {
-    const safeError = sanitizeResendError(error);
-    console.error(`[email] Error enviando correo con Resend a ${email}:`);
+    const safeError = sanitizeEmailProviderError(error);
+    console.error(`[email] Error enviando correo con ${config.provider} a ${email}:`);
     console.error(safeError);
     await rememberEmail(email, cleanSubject, text, "failed", safeError);
     emailState.lastCheckAt = new Date().toISOString();
+    emailState.provider = config.provider;
     emailState.lastError = safeError;
     return {
       sent: false,
       queued: true,
-      provider: "Resend",
-      reason: "Correo no enviado. Revisa la configuracion de Resend."
+      provider: config.provider,
+      reason: `Correo no enviado. Revisa la configuracion de ${config.provider}.`
     };
   }
 }
@@ -2763,7 +2962,7 @@ app.get("/health", (_req, res) => {
   res.status(200).json({
     ok: true,
     service: BRAND_NAME,
-    email: safeResendConfigStatus(),
+    email: safeEmailProviderStatus(),
     database: serializeDbState(),
     mysqlEnvPresent: mysqlEnvPresence(),
     mysqlConfigSources: mysqlConfigSources(),
