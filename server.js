@@ -10,7 +10,6 @@ const rateLimit = require("express-rate-limit");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const mysql = require("mysql2/promise");
-const nodemailer = require("nodemailer");
 const { google } = require("googleapis");
 const {
   getDbConfigCandidates,
@@ -52,11 +51,11 @@ const ADMIN_FAILED_LOGIN_LIMIT = 3;
 const ADMIN_BLOCK_MS = 24 * 60 * 60 * 1000;
 const ADMIN_WARNING_MESSAGE = "Si no eres admin, no pongas mas la contrasena.";
 const ADMIN_BLOCK_MESSAGE = "Bloqueado por querer acceder al panel de admin sin permiso ni contrasena.";
-let emailTransporter = null;
 let emailOAuth2Client = null;
+let gmailApiClient = null;
 const emailState = {
   configured: false,
-  provider: "Gmail OAuth2",
+  provider: "Gmail API OAuth2",
   lastCheckAt: null,
   lastError: null,
   lastEmailId: null
@@ -1061,7 +1060,7 @@ function gmailOAuthConfig() {
     : `${BRAND_NAME} <${user || ADMIN_EMAIL}>`;
   return {
     configured: Boolean(user && clientId && clientSecret && refreshToken),
-    provider: "Gmail OAuth2",
+    provider: "Gmail API OAuth2",
     user,
     clientId,
     clientSecret,
@@ -1093,7 +1092,7 @@ function safeEmailProviderStatus() {
     lastError: emailState.lastError,
     lastEmailId: emailState.lastEmailId,
     message: config.configured
-      ? "Gmail OAuth2 configurado."
+      ? "Gmail API OAuth2 configurado."
       : "Faltan GMAIL_USER, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET o GOOGLE_REFRESH_TOKEN."
   };
 }
@@ -1113,26 +1112,16 @@ async function getGmailAccessToken() {
   if (!oauth2Client) return null;
   const accessToken = await oauth2Client.getAccessToken();
   const token = typeof accessToken === "string" ? accessToken : accessToken?.token;
-  if (!token) throw new Error("Google no devolvio accessToken para Gmail OAuth2.");
+  if (!token) throw new Error("Google no devolvio accessToken para Gmail API OAuth2.");
   return token;
 }
 
-async function getGmailOAuthTransporter() {
+async function getGmailApiClient() {
   const config = gmailOAuthConfig();
   if (!config.configured) return null;
-  const accessToken = await getGmailAccessToken();
-  emailTransporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-      type: "OAuth2",
-      user: config.user,
-      clientId: config.clientId,
-      clientSecret: config.clientSecret,
-      refreshToken: config.refreshToken,
-      accessToken
-    }
-  });
-  return { transporter: emailTransporter, config, accessToken };
+  const oauth2Client = getEmailOAuth2Client();
+  if (!gmailApiClient) gmailApiClient = google.gmail({ version: "v1", auth: oauth2Client });
+  return gmailApiClient;
 }
 
 function sanitizeEmailProviderError(error) {
@@ -1152,16 +1141,16 @@ async function verifyEmailProviderInBackground() {
   emailState.lastCheckAt = new Date().toISOString();
   emailState.lastError = null;
   if (!config.configured) {
-    console.warn("[email] Gmail OAuth2 no configurado. Se guardaran correos en email_outbox como respaldo.");
+    console.warn("[email] Gmail API OAuth2 no configurado. Se guardaran correos en email_outbox como respaldo.");
     return;
   }
   try {
     await getGmailAccessToken();
-    console.log("[email] Gmail OAuth2 configurado para envio.");
+    console.log("[email] Gmail API OAuth2 configurado para envio.");
     console.log(JSON.stringify({
       provider: config.provider,
-      service: "gmail",
-      authType: "OAuth2",
+      transport: "gmail.users.messages.send",
+      network: "https",
       from: formatGmailFrom(config.from, config.user),
       adminEmail: ADMIN_EMAIL,
       gmailUser: config.user,
@@ -1172,9 +1161,113 @@ async function verifyEmailProviderInBackground() {
   } catch (error) {
     const safeError = sanitizeEmailProviderError(error);
     emailState.lastError = safeError;
-    console.error("[email] No se pudo obtener accessToken de Gmail OAuth2:");
+    console.error("[email] No se pudo obtener accessToken de Gmail API OAuth2:");
     console.error(safeError);
   }
+}
+
+function encodeEmailHeader(value) {
+  const clean = String(value || "").replace(/[\r\n]+/g, " ").trim();
+  if (/^[\x20-\x7e]*$/.test(clean)) return clean;
+  return `=?UTF-8?B?${Buffer.from(clean, "utf8").toString("base64")}?=`;
+}
+
+function quotedHeaderValue(value) {
+  return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\r\n]+/g, " ");
+}
+
+function base64Lines(buffer) {
+  return Buffer.from(buffer).toString("base64").replace(/.{1,76}/g, "$&\r\n").trim();
+}
+
+function base64Url(value) {
+  return Buffer.from(value, "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function buildGmailRawMessage({ from, to, subject, text, html, attachments = [] }) {
+  const date = new Date().toUTCString();
+  const mixedBoundary = `mixed_${crypto.randomBytes(12).toString("hex")}`;
+  const altBoundary = `alt_${crypto.randomBytes(12).toString("hex")}`;
+  const hasAttachments = attachments.length > 0;
+  const headers = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${encodeEmailHeader(subject)}`,
+    `Date: ${date}`,
+    "MIME-Version: 1.0",
+    hasAttachments
+      ? `Content-Type: multipart/mixed; boundary="${mixedBoundary}"`
+      : `Content-Type: multipart/alternative; boundary="${altBoundary}"`
+  ];
+  const alternativePart = [
+    `--${altBoundary}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    base64Lines(Buffer.from(text || "", "utf8")),
+    `--${altBoundary}`,
+    'Content-Type: text/html; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    base64Lines(Buffer.from(html || "", "utf8")),
+    `--${altBoundary}--`
+  ].join("\r\n");
+  const body = hasAttachments
+    ? [
+        `--${mixedBoundary}`,
+        `Content-Type: multipart/alternative; boundary="${altBoundary}"`,
+        "",
+        alternativePart,
+        ...attachments.map((item) => {
+          const filename = safeFilename(item.filename, "comprobante");
+          const contentType = cleanText(item.contentType || item.content_type, "application/octet-stream");
+          const content = Buffer.isBuffer(item.content) ? item.content : Buffer.from(String(item.content || ""), "base64");
+          return [
+            `--${mixedBoundary}`,
+            `Content-Type: ${contentType}; name="${quotedHeaderValue(filename)}"`,
+            `Content-Disposition: attachment; filename="${quotedHeaderValue(filename)}"`,
+            "Content-Transfer-Encoding: base64",
+            "",
+            base64Lines(content)
+          ].join("\r\n");
+        }),
+        `--${mixedBoundary}--`
+      ].join("\r\n")
+    : alternativePart;
+  return base64Url(`${headers.join("\r\n")}\r\n\r\n${body}`);
+}
+
+async function sendWithGmailApi(config, email, cleanSubject, text, html, attachments) {
+  const gmail = await getGmailApiClient();
+  if (!gmail) throw new Error("Gmail API no esta configurada.");
+  const from = formatGmailFrom(config.from, config.user);
+  const raw = buildGmailRawMessage({
+    from,
+    to: email,
+    subject: cleanSubject,
+    text,
+    html,
+    attachments
+  });
+  console.log("[email] Enviando correo con Gmail API:");
+  console.log(JSON.stringify({
+    provider: "Gmail API",
+    method: "gmail.users.messages.send",
+    network: "https",
+    from,
+    to: email,
+    subject: cleanSubject,
+    attachments: attachments.length
+  }, null, 2));
+  const response = await gmail.users.messages.send({
+    userId: "me",
+    requestBody: { raw }
+  });
+  return { id: response.data?.id || null };
 }
 
 function emailParagraphs(text) {
@@ -1385,41 +1478,18 @@ async function sendStoreEmail(input, subject, body) {
     return {
       sent: false,
       queued: true,
-      reason: "Correo no enviado. Falta configurar Gmail OAuth2 en el servidor.",
+      reason: "Correo no enviado. Falta configurar Gmail API OAuth2 en el servidor.",
       provider: config.provider
     };
   }
 
   try {
-    const { transporter } = await getGmailOAuthTransporter();
-    const from = formatGmailFrom(config.from, config.user);
-    console.log("[email] Enviando correo con Gmail OAuth2:");
-    console.log(JSON.stringify({
-      provider: "Gmail OAuth2",
-      service: "gmail",
-      authType: "OAuth2",
-      from,
-      to: email,
-      subject: cleanSubject,
-      attachments: attachments.length
-    }, null, 2));
-    const result = await transporter.sendMail({
-      from,
-      to: email,
-      subject: cleanSubject,
-      text,
-      html,
-      attachments: attachments.map((item) => ({
-        filename: safeFilename(item.filename, "comprobante"),
-        content: item.content,
-        contentType: item.contentType || item.content_type
-      }))
-    });
+    const result = await sendWithGmailApi(config, email, cleanSubject, text, html, attachments);
     emailState.lastError = null;
     emailState.lastCheckAt = new Date().toISOString();
     emailState.configured = true;
     emailState.provider = config.provider;
-    emailState.lastEmailId = result?.messageId || result?.response || null;
+    emailState.lastEmailId = result?.id || null;
     await rememberEmail(email, cleanSubject, text, "sent");
     return { sent: true, queued: false, provider: config.provider, id: emailState.lastEmailId };
   } catch (error) {
@@ -2871,7 +2941,7 @@ async function start() {
       console.log(`Puerto: ${activePort}`);
       console.log("El healthcheck /health responde aunque MySQL no este disponible.");
       verifyEmailProviderInBackground().catch((error) => {
-        console.error("[email] Error inesperado verificando Gmail OAuth2:");
+        console.error("[email] Error inesperado verificando Gmail API OAuth2:");
         console.error(error.stack || error);
       });
       initializeDatabaseInBackground();

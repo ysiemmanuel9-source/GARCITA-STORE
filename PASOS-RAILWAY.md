@@ -40,7 +40,7 @@ MYSQLDATABASE=${{MySQL.MYSQLDATABASE}}
 
 Si tu servicio MySQL se llama distinto, cambia `MySQL` por el nombre real del servicio.
 
-Para que lleguen correos reales de verificacion, comprobantes, aprobaciones y rechazos, configura Gmail OAuth2. No uses contrasena de aplicacion.
+Para que lleguen correos reales de verificacion, comprobantes, aprobaciones y rechazos, configura Gmail API con OAuth2. No uses contrasena de aplicacion.
 
 ```env
 GMAIL_USER=tu_correo@gmail.com
@@ -51,9 +51,9 @@ EMAIL_FROM=GARCITA STORE <tu_correo@gmail.com>
 ADMIN_EMAIL=mg4563690@gmail.com
 ```
 
-El servidor obtiene automaticamente el `accessToken` usando `googleapis` y envia con Nodemailer usando `service: "gmail"` y `auth.type = "OAuth2"`.
+El servidor obtiene automaticamente el `accessToken` usando `googleapis` y envia con `gmail.users.messages.send`. No abre conexion de correo tradicional.
 
-Si no configuras Gmail OAuth2, las compras y recargas no se rompen: el sistema guarda los correos en la tabla `email_outbox`, pero no puede enviarlos automaticamente.
+Si no configuras Gmail API OAuth2, las compras y recargas no se rompen: el sistema guarda los correos en la tabla `email_outbox`, pero no puede enviarlos automaticamente.
 
 Despues de agregar o corregir variables, haz `Deploy` o `Redeploy` del servicio web. Railway aplica las variables a la siguiente ejecucion del servicio.
 
